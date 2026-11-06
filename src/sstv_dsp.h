@@ -43,7 +43,7 @@
 #define SSTV_MEM_BYTES (540u * 1024u) /* everything sstv_new allocates, rounded up */
 
 enum { SSTV_IDLE = 0, SSTV_RX = 1 };
-enum { SSTV_START_NONE = 0, SSTV_START_VIS = 1, SSTV_START_SYNC = 2 };
+enum { SSTV_START_NONE = 0, SSTV_START_VIS = 1, SSTV_START_SYNC = 2, SSTV_START_CONT = 3 };
 enum { SSTV_END_NONE = 0, SSTV_END_COMPLETE = 1, SSTV_END_LOST = 2,
        SSTV_END_ABORT = 3, SSTV_END_NEWVIS = 4, SSTV_END_NOMEM = 5 };
 
@@ -99,6 +99,15 @@ int sstv_dirty(SstvRx *s, int *y0, int *y1);
 void sstv_abort(SstvRx *s);
 /* Blank the picture. */
 void sstv_clear(SstvRx *s);
+/* Continuous output: with a mode locked (or a VIS heard), a finished picture
+ * rolls straight into the next one on the same grid -- no VIS, no re-lock, no
+ * gap between frames. The picture is handed to the frame callback before the
+ * buffer is reused; if no callback is set the finished picture is simply
+ * overwritten. */
+void sstv_set_continuous(int on);
+int  sstv_get_continuous(void);
+void sstv_set_frame_cb(void (*cb)(void *ud, const uint16_t *px, int w, int h, int rows), void *ud);
+
 /* Listen for one mode only: vis = its VIS code, 0 = every mode (VIS decides).
  * With a lock the decoder still locks on line syncs when the VIS is missed, but
  * never switches to another mode. */

@@ -75,6 +75,22 @@ static double g_lost_sync = 6.0;
  * which is what a "listen for PD120 all evening" receiver wants. */
 static int g_lock_vis = 0;
 
+/* Continuous output: no VIS needed, and a finished picture rolls straight into
+ * the next one on the same line grid instead of going back to idle. The host
+ * gets the picture through the frame callback, which runs before the buffer is
+ * cleared for the next frame. */
+static int g_cont = 0;
+static void (*g_frame_cb)(void *ud, const uint16_t *px, int w, int h, int rows) = 0;
+static void *g_frame_ud = 0;
+
+void sstv_set_continuous(int on) { g_cont = on; }
+int  sstv_get_continuous(void) { return g_cont; }
+void sstv_set_frame_cb(void (*cb)(void *ud, const uint16_t *px, int w, int h, int rows), void *ud)
+{
+    g_frame_cb = cb;
+    g_frame_ud = ud;
+}
+
 void sstv_set_lost_seconds(double vis_s, double sync_s)
 {
     if (vis_s > 0.5) g_lost_vis = vis_s;
@@ -562,9 +578,32 @@ static void redraw_step(SstvRx *s, int budget)
     s->revision++;
 }
 
+static void start_rx(SstvRx *s, const Mode *m, double t0, int kind, float off);
+
+/* continuous output: the next frame is armed at the end of the previous one and
+ * starts as soon as a sync pulse of the same mode shows up */
+static int g_cont_pending = 0;
+static const Mode *g_cont_mode = 0;
+static float g_cont_off = 0.0f;
+
 static void finish(SstvRx *s, int why)
 {
     redraw_step(s, 1 << 30);                        /* the saved picture is fully re-timed */
+    if (why == SSTV_END_COMPLETE && g_cont && s->m) {
+        /* hand the finished picture out and arm the next frame: it starts on the
+         * first sync pulse that follows, so an inter-frame gap or a repeat VIS
+         * costs at most a line instead of everything. */
+        if (g_frame_cb) g_frame_cb(g_frame_ud, s->img, mode_sw(s->m), mode_sh(s->m), (int)s->k);
+        g_cont_pending = 1;
+        g_cont_mode = s->m;
+        g_cont_off = s->off;
+        s->state = SSTV_IDLE;
+        s->end_kind = SSTV_END_NONE;
+        s->t_end = s->n;
+        s->images++;
+        s->revision++;
+        return;
+    }
     s->state = SSTV_IDLE;
     s->end_kind = why;
     s->t_end = s->n;
@@ -801,6 +840,20 @@ static void autosync_try(SstvRx *s)
 {
     int mi;
     const Pulse *np = &s->pulses[s->npulses - 1];
+
+    /* continuous output: the frame that just finished is waiting for the next
+     * one to begin -- its first sync pulse is enough, no VIS and no 4-pulse run */
+    if (g_cont_pending && s->state == SSTV_IDLE && g_cont_mode) {
+        const Mode *m = g_cont_mode;
+        double Ls = m->sync * s->Fs;
+        if (sync_len_ok(s, m, np->edge)) {
+            float off = g_cont_off;
+            g_cont_pending = 0;
+            start_rx(s, m, (double)np->edge - Ls, SSTV_START_CONT, off);
+            return;
+        }
+    }
+
     for (mi = 0; mi < NMODES; mi++) {
         const Mode *m = &MODES[mi];
         double Ls = m->sync * s->Fs, P = m->line * s->Fs * (1.0 + s->ppm_prior * 1e-6);

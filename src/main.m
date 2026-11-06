@@ -51,6 +51,30 @@ static volatile sig_atomic_t g_sig_pause = 0, g_sig_cancel = 0;
 static float g_level = 0.0f;          /* smoothed RMS of the decoded input, 0..1 */
 static NSString *g_note = nil;        /* one line of state/warning for the window */
 static int g_paused = 0;              /* 1 = not feeding the decoder (audio still runs) */
+static int g_continuous = 0;          /* 1 = roll from one picture straight into the next */
+
+/* Called by the decoder (inside sstv_feed, so the lock is already held) with the
+ * finished picture, just before the buffer is reused for the next frame. */
+static void on_frame(void *ud, const uint16_t *px, int w, int h, int rows)
+{
+    (void)ud; (void)rows;
+    NSString *dir = g_outDir ? g_outDir : [@"." stringByExpandingTildeInPath];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                             attributes:nil error:NULL];
+    NSString *prefix = g_prefix ? g_prefix : @"sstv";
+    NSString *path = [dir stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"%@-%d.png", prefix, ++g_nimg]];
+    if (png_write_565(path.fileSystemRepresentation, px, w, h, g_scale) != 0) {
+        fprintf(stderr, "cannot write %s\n", path.fileSystemRepresentation);
+        return;
+    }
+    g_lastSaved = path;
+    if (!g_quiet) {
+        printf("            frame %d saved, carrying straight on -> %s\n", g_nimg,
+               path.fileSystemRepresentation);
+        fflush(stdout);
+    }
+}
 static NSSound *g_tx_sound = nil;      /* the WAV being sent, i.e. played out */
 static double g_tx_total = 0;          /* its length, seconds */
 static double g_tx_started = 0;        /* when playback started */
@@ -105,7 +129,12 @@ static void keep_awake(NSString *why)
 
 static const char *start_name(int k)
 {
-    return k == SSTV_START_VIS ? "VIS" : k == SSTV_START_SYNC ? "sync run (no VIS)" : "-";
+    switch (k) {
+    case SSTV_START_VIS:  return "VIS";
+    case SSTV_START_SYNC: return "sync run (no VIS)";
+    case SSTV_START_CONT: return "next frame (continuous)";
+    default:              return "-";
+    }
 }
 
 static const char *end_name(int k)
@@ -237,7 +266,8 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
                    start_name(g_st.start_kind), g_st.offset_hz);
         fflush(stdout);
     }
-    if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX) {
+    int rollover = (g_continuous && g_st.end_kind == SSTV_END_NONE);
+    if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX && !rollover) {
         /* a loss keeps the picture (the decoder re-aligns when syncs return),
          * so store it aside instead of using up a picture number */
         NSString *p = (g_st.end_kind == SSTV_END_LOST) ? save_partial_locked() : save_image_locked();
@@ -394,7 +424,8 @@ static int decode_file(NSString *path, int autosync, int have_ppm, int ppm)
         int vis_changed = g_st.last_vis != g_prev.last_vis && g_st.last_vis >= 0;
         int started = g_st.state == SSTV_RX && (g_prev.state != SSTV_RX || g_st.line < g_prev.line);
         int resumed = g_st.relocks > g_prev.relocks;
-        int ended = g_st.state != SSTV_RX && g_prev.state == SSTV_RX;
+        int ended = g_st.state != SSTV_RX && g_prev.state == SSTV_RX
+                    && !(g_continuous && g_st.end_kind == SSTV_END_NONE);
         if (ended) {
             NSString *p = (g_st.end_kind == SSTV_END_LOST) ? save_partial_locked() : save_image_locked();
             if (!g_quiet)
@@ -530,6 +561,7 @@ static void *sim_thread(void *arg)
     NSButton *_txPlayBtn;
     NSButton *_txSaveBtn;
     NSButton *_txStopBtn;
+    NSButton *_contChk;
 }
 - (void)refresh;
 @end
@@ -611,6 +643,16 @@ static void free_rgb(void *info, const void *data, size_t size)
         [_txStopBtn setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
         [self addSubview:_txStopBtn];
 
+        _contChk = [[NSButton alloc] initWithFrame:NSMakeRect(536, 36, 84, 24)];
+        [_contChk setButtonType:NSButtonTypeSwitch];
+        [_contChk setTitle:@"连续"];
+        [_contChk setState:NSControlStateValueOff];
+        [_contChk setTarget:self];
+        [_contChk setAction:@selector(continuousChanged:)];
+        [_contChk setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+        [_contChk setToolTip:@"不等 VIS，一张接一张往下解（配合「收:」锁定模式用）"];
+        [self addSubview:_contChk];
+
         _cancelBtn = [[NSButton alloc] initWithFrame:NSMakeRect(112, 6, 100, 24)];
         [_cancelBtn setTitle:@"取消这张"];
         [_cancelBtn setBezelStyle:NSBezelStyleRounded];
@@ -645,6 +687,16 @@ static void free_rgb(void *info, const void *data, size_t size)
 }
 
 /* ---- transmit: picture -> SSTV WAV -> speaker line ---- */
+
+- (void)continuousChanged:(id)sender
+{
+    g_continuous = ([_contChk state] == NSControlStateValueOn);
+    sstv_set_continuous(g_continuous);
+    g_note = g_continuous ? @"连续模式：不等 VIS，一张接一张解"
+                          : @"连续模式已关：等 VIS 头再起图";
+    [self.window makeFirstResponder:self];
+    [self setNeedsDisplay:YES];
+}
 
 - (void)rxModeChanged:(id)sender
 {
@@ -957,7 +1009,7 @@ static void free_rgb(void *info, const void *data, size_t size)
         NSDictionary *wa = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
                               NSForegroundColorAttributeName:
                                   [NSColor colorWithCalibratedRed:1.0 green:0.66 blue:0.3 alpha:1] };
-        CGFloat txX = 534;
+        CGFloat txX = 624;
         CGFloat txW = b.size.width - txX - 14;
         if (txW > 40) {
             [line drawInRect:NSMakeRect(txX, 62, txW, 16) withAttributes:wa];
@@ -1011,7 +1063,7 @@ static void run_ui(NSString *title, void (^start)(void))
     AppDel *del = [[AppDel alloc] init];
     [NSApp setDelegate:del];
 
-    NSRect frame = NSMakeRect(0, 0, 820, 660);
+    NSRect frame = NSMakeRect(0, 0, 900, 660);
     NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
                                                 styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                            NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
@@ -1231,6 +1283,8 @@ static void usage(const char *argv0)
     printf("  --no-view        no window (live / simulate)\n");
     printf("  --no-autosync    do not start on sync pulses when the VIS was missed\n");
     printf("  --ppm N          clock-error prior (ppm), used until the fit settles\n");
+    printf("  --continuous     keep decoding frame after frame without waiting for a VIS\n");
+    printf("                   (pair it with --rx-mode: it then just draws whatever arrives)\n");
     printf("  --rx-mode M      listen for one mode only (auto | pd120 | m1 | vis code);\n");
     printf("                   the app has the same thing as a popup next to the buttons\n");
     printf("  --lost S         give up on a picture after S seconds without sync (default 20;\n");
@@ -1364,6 +1418,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-autosync")) autosync = 0;
         else if (!strcmp(argv[i], "--ppm") && i + 1 < argc) { ppm = atoi(argv[++i]); have_ppm = 1; }
         else if (!strcmp(argv[i], "--lost") && i + 1 < argc) lost_s = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--continuous")) g_continuous = 1;
         else if (!strcmp(argv[i], "--drop-at") && i + 1 < argc) g_drop_at = atof(argv[++i]);
         else if (!strcmp(argv[i], "--drop-len") && i + 1 < argc) g_drop_len = atof(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) g_quiet = 1;
@@ -1394,6 +1449,8 @@ int main(int argc, char **argv)
     if (lost_s <= 0) lost_s = 20.0;      /* more forgiving than upstream's 12 s */
     if (lost_s > 0) sstv_set_lost_seconds(lost_s, lost_s / 2.0);
     if (rx_lock) sstv_set_mode_lock(rx_lock);
+    sstv_set_frame_cb(on_frame, NULL);
+    sstv_set_continuous(g_continuous);
     if (outDir) {
         g_outDir = [outDir stringByExpandingTildeInPath];
     } else if ([[NSBundle mainBundle] bundleIdentifier] != nil) {

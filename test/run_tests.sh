@@ -173,6 +173,37 @@ PY
     fi
 fi
 
+# fixed mode + continuous: a source with no VIS at all, two frames back to back.
+# The decoder must not wait for a header and must roll from one frame into the next.
+if [ -f "$OUT/PD120.wav" ]; then
+    "$TX" "$OUT/testcard.ppm" "$OUT/novis1.wav" --mode 95 --novis >/dev/null 2>&1
+    python3 - "$OUT" <<'PY2'
+import struct, sys, os
+d = sys.argv[1]
+def pcm(p):
+    b = open(p, 'rb').read()
+    i = b.find(b'data')
+    n = struct.unpack('<I', b[i+4:i+8])[0]
+    return b[i+8:i+8+n]
+body = pcm(os.path.join(d, 'novis1.wav')) * 2
+with open(os.path.join(d, 'novis2.wav'), 'wb') as f:
+    f.write(b'RIFF' + struct.pack('<I', 36 + len(body)) + b'WAVEfmt ')
+    f.write(struct.pack('<IHHIIHH', 16, 1, 1, 44100, 88200, 2, 16))
+    f.write(b'data' + struct.pack('<I', len(body)))
+    f.write(body)
+PY2
+    rm -f "$OUT"/cc-*.png
+    clog=$("$BIN" "$OUT/novis2.wav" --rx-mode pd120 --continuous --out "$OUT" --prefix cc 2>&1)
+    ncc=$(ls "$OUT"/cc-*.png 2>/dev/null | wc -l | tr -d ' ')
+    done2=$(echo "$clog" | grep -c 'frame .* saved')
+    if [ "$ncc" = "2" ] && [ "$done2" = "2" ] && \
+       ! echo "$clog" | grep -q 'signal lost'; then
+        ok "continuous, no VIS" 95 "two frames back to back, 2 files"
+    else
+        bad "continuous, no VIS" 95 "files $ncc, frames $done2 :: $(echo "$clog" | grep -E 'VIS|frame|ended' | tr '\n' '|')"
+    fi
+fi
+
 # continuous reception: six pictures one after another, no gap at all, then the
 # same with a 4 s pause between pictures (a sender changing mode by hand)
 python3 - "$OUT" <<'PY'
