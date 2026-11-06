@@ -138,7 +138,7 @@ static NSArray<NSString *> *supported_modes(void)
 /* ------------------------------------------------------------- image save */
 
 /* Caller holds g_lock. Returns the path written, or nil. */
-static NSString *save_image_locked(void)
+static NSString *save_named_locked(NSString *name)
 {
     int w = 0, h = 0;
     const uint16_t *px = sstv_image(g_rx, &w, &h);
@@ -147,16 +147,31 @@ static NSString *save_image_locked(void)
     NSString *dir = g_outDir ? g_outDir : [@"." stringByExpandingTildeInPath];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
                              attributes:nil error:NULL];
-    NSString *prefix = g_prefix ? g_prefix : @"sstv";
-    NSString *path = [dir stringByAppendingPathComponent:
-                      [NSString stringWithFormat:@"%@-%d.png", prefix, ++g_nimg]];
-
+    NSString *path = [dir stringByAppendingPathComponent:name];
     if (png_write_565(path.fileSystemRepresentation, px, w, h, g_scale) != 0) {
         fprintf(stderr, "cannot write %s\n", path.fileSystemRepresentation);
         return nil;
     }
     g_lastSaved = path;
     return path;
+}
+
+/* finished picture: <prefix>-N.png, and the counter moves on */
+static NSString *save_image_locked(void)
+{
+    NSString *prefix = g_prefix ? g_prefix : @"sstv";
+    return save_named_locked([NSString stringWithFormat:@"%@-%d.png", prefix, ++g_nimg]);
+}
+
+/* the picture is on hold after a dropout: keep it, but don't use up a picture
+ * number -- if the signal comes back the decoder carries on with the same one */
+static int g_npartial = 0;
+static NSString *g_lastPartial = nil;
+static NSString *save_partial_locked(void)
+{
+    NSString *prefix = g_prefix ? g_prefix : @"sstv";
+    g_lastPartial = save_named_locked([NSString stringWithFormat:@"%@-partial%d.png", prefix, ++g_npartial]);
+    return g_lastPartial;
 }
 
 /* ------------------------------------------------------------- audio feed */
@@ -204,16 +219,29 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
                    g_st.last_vis_ok ? "" : " - not decoded by this build");
         fflush(stdout);
     }
-    if (g_st.state == SSTV_RX && (g_prev.state != SSTV_RX || g_st.line < g_prev.line)) {
+    int resumed = g_st.relocks > g_prev.relocks;
+    if (resumed) {
+        /* the same picture, re-aligned after a dropout: not a new image */
+        if (!g_quiet)
+            printf("%7.2f s  %s re-aligned, carrying on at row %d\n", t, g_st.mode, g_st.line);
+        g_note = [NSString stringWithFormat:@"已自动对齐，从第 %d 行接着画", g_st.line];
+        if (g_lastPartial) {                       /* the partial is stale now */
+            [[NSFileManager defaultManager] removeItemAtPath:g_lastPartial error:NULL];
+            g_lastPartial = nil;
+        }
+        fflush(stdout);
+    } else if (g_st.state == SSTV_RX && (g_prev.state != SSTV_RX || g_st.line < g_prev.line)) {
         if (!g_quiet)
             printf("%7.2f s  %s started (%s), tuning offset %+d Hz\n", t, g_st.mode,
                    start_name(g_st.start_kind), g_st.offset_hz);
         fflush(stdout);
     }
     if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX) {
-        NSString *p = save_image_locked();
+        /* a loss keeps the picture (the decoder re-aligns when syncs return),
+         * so store it aside instead of using up a picture number */
+        NSString *p = (g_st.end_kind == SSTV_END_LOST) ? save_partial_locked() : save_image_locked();
         if (g_st.end_kind == SSTV_END_LOST)
-            g_note = [NSString stringWithFormat:@"信号中断：%.0f 秒没同步脉冲，已把到第 %d 行的图存盘（--lost 可放宽）",
+            g_note = [NSString stringWithFormat:@"信号断了 %.0f 秒，图先留着（第 %d 行）——信号回来会接着画",
                       sstv_get_lost_seconds(), g_st.line];
         else if (g_st.end_kind == SSTV_END_COMPLETE)
             g_note = nil;
@@ -269,6 +297,10 @@ static int pick_rate(int file_rate)
     if (file_rate < 8000 || file_rate > 48000) return 44100;
     return file_rate;
 }
+
+/* test hook: pretend the capture dropped the samples in [drop_at, drop_at+len)
+ * seconds -- the decoder is told through sstv_gap, exactly as a real overrun */
+static double g_drop_at = -1, g_drop_len = 0;
 
 static int decode_file(NSString *path, int autosync, int have_ppm, int ppm)
 {
@@ -342,15 +374,28 @@ static int decode_file(NSString *path, int autosync, int have_ppm, int ppm)
         UInt32 got = (UInt32)frames;
         if (ExtAudioFileRead(ef, &got, &abl) != noErr || got == 0) break;
         pthread_mutex_lock(&g_lock);
-        sstv_feed(g_rx, buf, (int)got, ch);
+        {
+            /* dropout simulation: the samples inside the window are 'lost' */
+            double s0 = g_samples / g_rate, s1 = (g_samples + got) / g_rate;
+            if (g_drop_at >= 0 && s1 > g_drop_at && s0 < g_drop_at + g_drop_len) {
+                double a = fmax(s0, g_drop_at), b = fmin(s1, g_drop_at + g_drop_len);
+                int i0 = (int)((a - s0) * g_rate), i1 = (int)((b - s0) * g_rate);
+                if (i0 > 0) sstv_feed(g_rx, buf, i0, ch);
+                sstv_gap(g_rx, i1 - i0);
+                if (i1 < (int)got) sstv_feed(g_rx, buf + (size_t)i1 * ch, (int)got - i1, ch);
+            } else {
+                sstv_feed(g_rx, buf, (int)got, ch);
+            }
+        }
         g_samples += got;
         sstv_status(g_rx, &g_st);
         double t = g_samples / g_rate;
         int vis_changed = g_st.last_vis != g_prev.last_vis && g_st.last_vis >= 0;
         int started = g_st.state == SSTV_RX && (g_prev.state != SSTV_RX || g_st.line < g_prev.line);
+        int resumed = g_st.relocks > g_prev.relocks;
         int ended = g_st.state != SSTV_RX && g_prev.state == SSTV_RX;
         if (ended) {
-            NSString *p = save_image_locked();
+            NSString *p = (g_st.end_kind == SSTV_END_LOST) ? save_partial_locked() : save_image_locked();
             if (!g_quiet)
                 printf("%7.2f s  image ended (%s): %s, %d/%d rows, syncs %d/%d, clock %+d ppm%s -> %s\n",
                        t, end_name(g_st.end_kind), g_st.mode, g_st.line, g_st.height,
@@ -368,9 +413,16 @@ static int decode_file(NSString *path, int autosync, int have_ppm, int ppm)
             printf("%7.2f s  VIS %d (%s)%s\n", t, now.last_vis, nm ? nm : "unknown",
                    now.last_vis_ok ? "" : " - not decoded by this build");
         }
-        if (started && !g_quiet)
+        if (resumed && !g_quiet) {
+            printf("%7.2f s  %s re-aligned, carrying on at row %d\n", t, now.mode, now.line);
+            if (g_lastPartial) {
+                [[NSFileManager defaultManager] removeItemAtPath:g_lastPartial error:NULL];
+                g_lastPartial = nil;
+            }
+        } else if (started && !g_quiet) {
             printf("%7.2f s  %s started (%s), tuning offset %+d Hz\n", t, now.mode,
                    start_name(now.start_kind), now.offset_hz);
+        }
         fflush(stdout);
         g_prev = now;
     }
@@ -789,7 +841,7 @@ static void free_rgb(void *info, const void *data, size_t size)
                  start_name(st.start_kind)];
     else if (st.mode)
         line1 = [NSString stringWithFormat:@"%@ %s · 已在听下一个（本轮 %d 张）",
-                 @(st.mode), zh_end(st.end_kind), g_nimg];
+                 @(st.mode), st.end_kind == SSTV_END_LOST ? "中断·图已保留，等它回来对齐" : zh_end(st.end_kind), g_nimg];
     else if (st.last_vis >= 0)
         line1 = [NSString stringWithFormat:@"待机 · 自动识别（上次 VIS %d%s）",
                  st.last_vis, st.last_vis_ok ? "" : "，本版不解"];
@@ -1279,6 +1331,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-autosync")) autosync = 0;
         else if (!strcmp(argv[i], "--ppm") && i + 1 < argc) { ppm = atoi(argv[++i]); have_ppm = 1; }
         else if (!strcmp(argv[i], "--lost") && i + 1 < argc) lost_s = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--drop-at") && i + 1 < argc) g_drop_at = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--drop-len") && i + 1 < argc) g_drop_len = atof(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) g_quiet = 1;
         else if (!strcmp(argv[i], "--send") && i + 1 < argc) g_send_image = [@(argv[++i]) stringByExpandingTildeInPath];
         else if (!strcmp(argv[i], "--no-play")) g_send_play = 0;
@@ -1298,6 +1352,7 @@ int main(int argc, char **argv)
         id pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"lostSeconds"];
         if (pref) lost_s = [pref doubleValue];
     }
+    if (lost_s <= 0) lost_s = 20.0;      /* more forgiving than upstream's 12 s */
     if (lost_s > 0) sstv_set_lost_seconds(lost_s, lost_s / 2.0);
     g_outDir = outDir ? [outDir stringByExpandingTildeInPath] : nil;
 

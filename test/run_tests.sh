@@ -147,9 +147,20 @@ PY
     dl=$("$BIN" "$OUT/dropout.wav" --out "$OUT" --prefix drop 2>&1)
     drows=$(echo "$dl" | grep 'signal lost' | grep -oE '[0-9]+/[0-9]+ rows' | head -1)
     if echo "$dl" | grep -q 'image ended (signal lost)'; then
-        ok dropout 95 "ended early as designed: $drows rows (12 s without sync)"
+        ok dropout 95 "ended early as designed: $drows (20 s without sync)"
     else
         bad dropout 95 "expected a signal-lost end :: $(echo "$dl" | grep ended | tr '\n' '|')"
+    fi
+
+    # a real capture dropout (samples lost, reported through sstv_gap) must NOT
+    # interrupt the picture: the time base stays exact, the decoder bridges it
+    rm -f "$OUT"/hole-*.png
+    hl=$("$BIN" "$OUT/PD120.wav" --out "$OUT" --prefix hole --drop-at 60 --drop-len 15 2>&1)
+    if echo "$hl" | grep -q 'image ended (complete): PD120, 496/496' && \
+       ! echo "$hl" | grep -q 'signal lost'; then
+        ok "capture dropout" 95 "15 s of lost samples bridged, picture complete 496/496"
+    else
+        bad "capture dropout" 95 "$(echo "$hl" | grep -E 'ended|started|re-aligned' | tr '\n' '|')"
     fi
 
     rm -f "$OUT"/dropL-*.png
