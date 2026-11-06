@@ -154,6 +154,24 @@ Dock 常驻：`defaults write com.apple.dock persistent-apps -array-add '<dict><
 图标是 `assets/AppIcon-1024.png`（一张解出来的测试卡，圆角由 `tools/makeicon.c` 现切），
 想换：`make icon SRC=别的图.png`。`assets/AppIcon.icns` 由 Makefile 用 sips + iconutil 生成。
 
+## 图为什么会提前结束
+
+窗口第一行现在直接写原因，不用猜：
+
+| 显示 | 含义 | 处理 |
+|---|---|---|
+| `完成` | 496/496 行都收到了 | 正常 |
+| `信号中断` | 连续 12 秒没找到同步脉冲，解码器放弃这一张（上游 `LOST_S_VIS`；autosync 起头的图只要 6 秒） | 信号衰落/电平太低，或机器卡顿导致丢样——看第二行有没有 `丢样 N`；用 `--lost 30` 放宽等待 |
+| `被新信号打断` | 图中间误判出一个 VIS 头 | 噪声里的假 VIS；换干净的音频源或降噪 |
+| `已取消` | 点了「取消这张」/ 发了 SIGUSR2 | —— |
+
+机器卡顿（App Nap、后台被降频）会让采集环形缓冲溢出，解码器看到一段空洞，表现和信号中断一模一样。
+程序现在用 `beginActivityWithOptions(NSActivityLatencyCritical)` 顶住 App Nap，窗口第二行显示累计 `丢样 N`。
+`.app` 启动时没有终端，事件日志写到 `~/Library/Logs/SSTV Tool.log`，出问题先翻这个文件。
+
+自测里有一条专门造这种洞：PD120 中间挖掉 15 秒 → 默认在 72 秒判 `signal lost`（278/496 行），
+`--lost 30` 则撑到 348 行才收。
+
 ## 硬件接入
 
 - 收：电台/对讲机喇叭对着麦克风能解，但不稳。正经做法是音频线进线路输入（USB 声卡），或者

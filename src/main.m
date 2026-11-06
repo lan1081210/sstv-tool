@@ -60,6 +60,49 @@ static NSString *g_send_image = nil;   /* --send: transmit this picture on start
 static int g_send_play = 1;
 static int g_mode_vis = 8;             /* --mode for --send */
 
+static const char *zh_end(int k)
+{
+    switch (k) {
+    case SSTV_END_COMPLETE: return "完成";
+    case SSTV_END_LOST:     return "信号中断";
+    case SSTV_END_ABORT:    return "已取消";
+    case SSTV_END_NEWVIS:   return "被新信号打断";
+    case SSTV_END_NOMEM:    return "内存不足";
+    default:                return "结束";
+    }
+}
+
+/* Launched from the .app there is no terminal: keep a log so "why did it stop
+ * early" has an answer afterwards. */
+static void setup_headless_log(void)
+{
+    if ([[NSBundle mainBundle] bundleIdentifier] == nil) return;   /* CLI: stdout is fine */
+    if (isatty(fileno(stdout))) return;
+    NSString *dir = [@"~/Library/Logs" stringByExpandingTildeInPath];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                             attributes:nil error:NULL];
+    NSString *path = [dir stringByAppendingPathComponent:@"SSTV Tool.log"];
+    FILE *f = freopen(path.fileSystemRepresentation, "a", stdout);
+    if (!f) return;
+    dup2(fileno(f), fileno(stderr));
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    [df setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+    printf("\n=== %s ===\n", [[df stringFromDate:[NSDate date]] UTF8String]);
+}
+
+/* A stalled process (App Nap, a busy disk) makes the feeder thread fall behind,
+ * the ring overruns, and the decoder sees a hole long enough to give up. Hold
+ * the process awake while we listen. */
+static id g_activity = nil;
+static void keep_awake(NSString *why)
+{
+    if (g_activity) return;
+    g_activity = [[NSProcessInfo processInfo]
+                  beginActivityWithOptions:(NSActivityLatencyCritical | NSActivityUserInitiated)
+                                    reason:why];
+}
+
 static const char *start_name(int k)
 {
     return k == SSTV_START_VIS ? "VIS" : k == SSTV_START_SYNC ? "sync run (no VIS)" : "-";
@@ -169,6 +212,11 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
     }
     if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX) {
         NSString *p = save_image_locked();
+        if (g_st.end_kind == SSTV_END_LOST)
+            g_note = [NSString stringWithFormat:@"信号中断：%.0f 秒没同步脉冲，已把到第 %d 行的图存盘（--lost 可放宽）",
+                      sstv_get_lost_seconds(), g_st.line];
+        else if (g_st.end_kind == SSTV_END_COMPLETE)
+            g_note = nil;
         if (!g_quiet)
             printf("%7.2f s  image ended (%s): %s, %d/%d rows, syncs %d/%d, clock %+d ppm%s -> %s\n",
                    t, end_name(g_st.end_kind), g_st.mode, g_st.line, g_st.height,
@@ -386,6 +434,7 @@ static void *sim_thread(void *arg)
     g_prev.last_vis = -1;
     pthread_mutex_unlock(&g_lock);
 
+    keep_awake(@"SSTV replay");
     const int frames = 1024;
     int16_t *buf = malloc((size_t)frames * (size_t)ch * sizeof(int16_t));
     struct timespec t0;
@@ -739,7 +788,8 @@ static void free_rgb(void *info, const void *data, size_t size)
         line1 = [NSString stringWithFormat:@"%@  %@  %d/%d 行  (%s)", st.mode ? @(st.mode) : @"?", st.end_kind == SSTV_END_NONE ? @"接收中" : @"", st.line, st.height,
                  start_name(st.start_kind)];
     else if (st.mode)
-        line1 = [NSString stringWithFormat:@"%@ 完成 · 已在听下一个（本轮 %d 张）", @(st.mode), g_nimg];
+        line1 = [NSString stringWithFormat:@"%@ %s · 已在听下一个（本轮 %d 张）",
+                 @(st.mode), zh_end(st.end_kind), g_nimg];
     else if (st.last_vis >= 0)
         line1 = [NSString stringWithFormat:@"待机 · 自动识别（上次 VIS %d%s）",
                  st.last_vis, st.last_vis_ok ? "" : "，本版不解"];
@@ -750,11 +800,14 @@ static void free_rgb(void *info, const void *data, size_t size)
     NSString *line2;
     if (!g_rx)
         line2 = @"输出：系统默认设备   ·   生成的 WAV 存在 ~/Music/SSTV Tool";
-    else
-        line2 = [NSString stringWithFormat:@"调谐 %d Hz (偏移 %+d)   时钟 %+d ppm%s   同步 %d/%d   电平 %.0f dBFS",
+    else {
+        unsigned long long dropped = audio_in_lost();
+        line2 = [NSString stringWithFormat:@"调谐 %d Hz (偏移 %+d)   时钟 %+d ppm%s   同步 %d/%d   电平 %.0f dBFS%s",
                  st.tone_hz, st.offset_hz, st.ppm, st.ppm_valid ? "" : "(先验)",
                  st.sync_good, st.sync_seen,
-                 level > 0.0001f ? 20.0 * log10(level) : -99.0];
+                 level > 0.0001f ? 20.0 * log10(level) : -99.0,
+                 dropped ? [[NSString stringWithFormat:@"   丢样 %llu", dropped] UTF8String] : ""];
+    }
     [line2 drawAtPoint:NSMakePoint(14, b.size.height - 38) withAttributes:w2];
 
     NSString *line3 = g_lastSaved ? [NSString stringWithFormat:@"已存 %@", [g_lastSaved lastPathComponent]]
@@ -991,6 +1044,8 @@ static int begin_capture(int device_index, int autosync, int have_ppm, int ppm)
     }
     g_note = nil;
 
+    keep_awake(@"SSTV receive");
+
     if (!g_quiet) {
         printf("capturing from \"%s\" at %d Hz, saving to %s\n",
                audio_in_device_name(), rate,
@@ -1094,6 +1149,8 @@ static void usage(const char *argv0)
     printf("  --no-view        no window (live / simulate)\n");
     printf("  --no-autosync    do not start on sync pulses when the VIS was missed\n");
     printf("  --ppm N          clock-error prior (ppm), used until the fit settles\n");
+    printf("  --lost S         give up on a picture after S seconds without sync (default 12;\n");
+    printf("                   a marginal or fading signal survives longer with a bigger value)\n");
     printf("  --quiet          no event log\n");
     printf("  --modes          list the modes this build decodes, then exit\n\n");
     printf("modes: Robot 36/72, Martin M1/M2, Scottie S1/S2/DX, PD50/90/120/160/180/240/290\n");
@@ -1181,6 +1238,7 @@ static int encode_cli(int argc, char **argv)
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
+    @autoreleasepool { setup_headless_log(); }
 
     if (argc > 1 && !strcmp(argv[1], "encode")) {
         @autoreleasepool { return encode_cli(argc, argv); }
@@ -1194,6 +1252,7 @@ int main(int argc, char **argv)
     BOOL listen = NO, view = YES, simulate = NO;
     const char *simfile = NULL;
     int device = -1, autosync = 1, have_ppm = 0, ppm = 0;
+    double lost_s = 0;
     NSString *outDir = nil, *prefix = nil;
 
     for (int i = 1; i < argc; i++) {
@@ -1219,6 +1278,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-view")) view = NO;
         else if (!strcmp(argv[i], "--no-autosync")) autosync = 0;
         else if (!strcmp(argv[i], "--ppm") && i + 1 < argc) { ppm = atoi(argv[++i]); have_ppm = 1; }
+        else if (!strcmp(argv[i], "--lost") && i + 1 < argc) lost_s = atof(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) g_quiet = 1;
         else if (!strcmp(argv[i], "--send") && i + 1 < argc) g_send_image = [@(argv[++i]) stringByExpandingTildeInPath];
         else if (!strcmp(argv[i], "--no-play")) g_send_play = 0;
@@ -1232,6 +1292,7 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 2; }
     }
     if (g_scale < 1) g_scale = 1;
+    if (lost_s > 0) sstv_set_lost_seconds(lost_s, lost_s / 2.0);
     g_outDir = outDir ? [outDir stringByExpandingTildeInPath] : nil;
 
     @autoreleasepool {

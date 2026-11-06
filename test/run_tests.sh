@@ -126,6 +126,42 @@ else
     bad fourmodes 8/12/44/40 "pictures $nfour, completed $got_modes :: $(echo "$flog" | grep -E 'VIS|ended' | tr '\n' '|')"
 fi
 
+# a hole in the signal: 15 s of silence in the middle of PD120. The decoder
+# gives up after its sync-loss window (12 s by default) -- that is the "picture
+# ended early" case -- and --lost can stretch the window.
+if [ -f "$OUT/PD120.wav" ]; then
+    python3 - "$OUT" <<'PY'
+import wave, sys, os
+d = sys.argv[1]
+w = wave.open(os.path.join(d, 'PD120.wav'))
+n, rate, ch, sw = w.getnframes(), w.getframerate(), w.getnchannels(), w.getsampwidth()
+data = w.readframes(n)
+w.close()
+cut = 60 * rate * ch * sw
+gap = b'\x00' * (15 * rate * ch * sw)
+o = wave.open(os.path.join(d, 'dropout.wav'), 'wb')
+o.setnchannels(ch); o.setsampwidth(sw); o.setframerate(rate)
+o.writeframes(data[:cut] + gap + data[cut:]); o.close()
+PY
+    rm -f "$OUT"/drop-*.png
+    dl=$("$BIN" "$OUT/dropout.wav" --out "$OUT" --prefix drop 2>&1)
+    drows=$(echo "$dl" | grep 'signal lost' | grep -oE '[0-9]+/[0-9]+ rows' | head -1)
+    if echo "$dl" | grep -q 'image ended (signal lost)'; then
+        ok dropout 95 "ended early as designed: $drows rows (12 s without sync)"
+    else
+        bad dropout 95 "expected a signal-lost end :: $(echo "$dl" | grep ended | tr '\n' '|')"
+    fi
+
+    rm -f "$OUT"/dropL-*.png
+    ll=$("$BIN" "$OUT/dropout.wav" --out "$OUT" --prefix dropL --lost 30 2>&1)
+    lrows=$(echo "$ll" | grep 'signal lost' | sed 's/.*: PD120, \([0-9]*\)\/496.*/\1/' | head -1)
+    if [ "${lrows:-0}" -gt 300 ]; then
+        ok "dropout --lost 30" 95 "held on longer: $lrows rows"
+    else
+        bad "dropout --lost 30" 95 "rows $lrows (want > 300) :: $(echo "$ll" | grep ended | tr '\n' '|')"
+    fi
+fi
+
 # continuous reception: six pictures one after another, no gap at all, then the
 # same with a 4 s pause between pictures (a sender changing mode by hand)
 python3 - "$OUT" <<'PY'

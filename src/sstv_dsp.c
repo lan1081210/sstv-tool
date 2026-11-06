@@ -66,8 +66,18 @@ static void *d_calloc(size_t n, size_t sz)
 #define IMG_BYTES    (2u * R36_W * R36_H + 2u * R36_W * R36_H)   /* Robot 36 picture + Y + C lines;
                                            >= SSTV_MAX_W * SSTV_MAX_H * 2 for every other mode */
 typedef char img_bytes_cover_max[(IMG_BYTES >= 2u * SSTV_MAX_W * SSTV_MAX_H) ? 1 : -1];
-#define LOST_S_VIS   12.0               /* seconds of missed syncs -> give up (VIS start) */
-#define LOST_S_SYNC  6.0                /* ... after an autosync start */
+/* seconds of missed syncs -> give up (VIS start), and after an autosync start.
+ * Upstream had these as literals; they are variables here so the receiver can
+ * be told to hold on longer with a marginal signal (sstv_set_lost_seconds). */
+static double g_lost_vis = 12.0;
+static double g_lost_sync = 6.0;
+
+void sstv_set_lost_seconds(double vis_s, double sync_s)
+{
+    if (vis_s > 0.5) g_lost_vis = vis_s;
+    if (sync_s > 0.5) g_lost_sync = sync_s;
+}
+double sstv_get_lost_seconds(void) { return g_lost_vis; }
 #define MAX_SKEW     0.03               /* clamp the fitted line period to +-3 % */
 #define RD_BUDGET    10240              /* channel-pixels re-timed per sstv_feed call (bounds
                                            the per-frame cost on the nano) */
@@ -639,7 +649,7 @@ static void process_period(SstvRx *s)
     render_period(s, k, t);
     s->k = k + 1;
     s->revision++;
-    lost = (int)((s->start_kind == SSTV_START_VIS ? LOST_S_VIS : LOST_S_SYNC) / s->m->line);
+    lost = (int)((s->start_kind == SSTV_START_VIS ? g_lost_vis : g_lost_sync) / s->m->line);
     if (lost < 8) lost = 8;
     if (s->k >= s->nper) finish(s, SSTV_END_COMPLETE);
     else if (s->miss_run >= lost) finish(s, SSTV_END_LOST);

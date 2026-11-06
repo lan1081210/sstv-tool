@@ -99,6 +99,12 @@ int sstv_dirty(SstvRx *s, int *y0, int *y1);
 void sstv_abort(SstvRx *s);
 /* Blank the picture. */
 void sstv_clear(SstvRx *s);
+/* How long the receiver may go without a sync pulse before it gives up on the
+ * picture and goes back to listening. Upstream: 12 s (VIS start) / 6 s (after an
+ * autosync start). A marginal signal survives longer with a bigger value. */
+void   sstv_set_lost_seconds(double vis_s, double sync_s);
+double sstv_get_lost_seconds(void);
+
 /* Start on a run of line syncs when no VIS was heard (default on). */
 void sstv_set_autosync(SstvRx *s, int on);
 /* Prior for the clock error (ppm), used until the fit takes over. The decoder

@@ -22,6 +22,7 @@
 static int16_t ring[RING_SAMPLES];
 static volatile uint32_t g_w, g_r;       /* free-running sample counters */
 static volatile uint32_t g_lost;         /* samples dropped since last report */
+static volatile uint64_t g_lost_total;   /* dropped since start (overruns) */
 static volatile int g_run;
 static volatile int g_live;
 static volatile int g_render_err;        /* last AudioUnitRender error, 0 = fine */
@@ -166,7 +167,7 @@ static OSStatus input_cb(void *refCon, AudioUnitRenderActionFlags *flags,
     for (UInt32 i = 0; i < frames; i++) {
         float v = f[i * 1];
         if (v > 1.0f) v = 1.0f; else if (v < -1.0f) v = -1.0f;
-        if (w - r >= RING_SAMPLES) { g_lost++; r++; }
+        if (w - r >= RING_SAMPLES) { g_lost++; g_lost_total++; r++; }
         ring[w & RING_MASK] = (int16_t)(v * 32767.0f);
         w++;
     }
@@ -301,6 +302,7 @@ int audio_in_open(int device_index, int want_rate,
     }
     g_feed = feed; g_gap = gap; g_ctx = ctx;
     g_w = g_r = g_lost = 0;
+    g_lost_total = 0;
     g_render_err = 0;
     if (out_rate) *out_rate = rate;
     return 0;
@@ -337,6 +339,7 @@ void audio_in_stop(void)
 }
 
 int audio_in_health(void) { return g_render_err; }
+unsigned long long audio_in_lost(void) { return g_lost_total; }
 
 const char *audio_in_device_name(void) { return g_name; }
 int audio_in_rate(void) { return g_rate; }

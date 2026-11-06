@@ -38,6 +38,10 @@ void audio_in_stop(void);
  * rate, the hardware does not resample on input). */
 int audio_in_health(void);
 
+/* Input samples dropped since the capture started (ring overruns: the feeder
+ * could not keep up, e.g. the process was throttled). */
+unsigned long long audio_in_lost(void);
+
 /* Name of the device being captured, "" before open. */
 const char *audio_in_device_name(void);
 /* Rate negotiated by audio_in_open. */
