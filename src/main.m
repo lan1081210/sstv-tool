@@ -145,6 +145,8 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
                    t, end_name(g_st.end_kind), g_st.mode, g_st.line, g_st.height,
                    g_st.sync_good, g_st.sync_seen, g_st.ppm,
                    g_st.ppm_valid ? "" : " (prior)", p ? p.fileSystemRepresentation : "(not saved)");
+        if (g_st.end_kind == SSTV_END_COMPLETE && !g_quiet)
+            printf("            listening for the next one\n");
         fflush(stdout);
     }
     g_prev = g_st;
@@ -274,6 +276,9 @@ static int decode_file(NSString *path, int autosync, int have_ppm, int ppm)
                        t, end_name(g_st.end_kind), g_st.mode, g_st.line, g_st.height,
                        g_st.sync_good, g_st.sync_seen, g_st.ppm,
                        g_st.ppm_valid ? "" : " (prior)", p ? p.fileSystemRepresentation : "(not saved)");
+            if (g_st.end_kind == SSTV_END_COMPLETE && !g_quiet) {
+                printf("            listening for the next one\n");
+            }
         }
         SstvStatus now = g_st;
         pthread_mutex_unlock(&g_lock);
@@ -494,7 +499,7 @@ static void free_rgb(void *info, const void *data, size_t size)
         line1 = [NSString stringWithFormat:@"%@  %@  %d/%d 行  (%s)", st.mode ? @(st.mode) : @"?", st.end_kind == SSTV_END_NONE ? @"接收中" : @"", st.line, st.height,
                  start_name(st.start_kind)];
     else if (st.mode)
-        line1 = [NSString stringWithFormat:@"%@  已完成 (%s)  %d 张", @(st.mode), end_name(st.end_kind), g_nimg];
+        line1 = [NSString stringWithFormat:@"%@ 完成 · 已在听下一个（本轮 %d 张）", @(st.mode), g_nimg];
     else if (st.last_vis >= 0)
         line1 = [NSString stringWithFormat:@"待机 · 自动识别（上次 VIS %d%s）",
                  st.last_vis, st.last_vis_ok ? "" : "，本版不解"];

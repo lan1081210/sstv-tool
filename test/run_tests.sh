@@ -126,6 +126,38 @@ else
     bad fourmodes 8/12/44/40 "pictures $nfour, completed $got_modes :: $(echo "$flog" | grep -E 'VIS|ended' | tr '\n' '|')"
 fi
 
+# continuous reception: six pictures one after another, no gap at all, then the
+# same with a 4 s pause between pictures (a sender changing mode by hand)
+python3 - "$OUT" <<'PY'
+import struct, sys, os
+d = sys.argv[1]
+def pcm(p):
+    b = open(p, 'rb').read()
+    i = b.find(b'data')
+    n = struct.unpack('<I', b[i+4:i+8])[0]
+    return b[i+8:i+8+n]
+src = ['Robot36.wav', 'PD50.wav', 'MartinM2.wav', 'Robot72.wav', 'Robot36.wav', 'MartinM2.wav']
+gap = b'\x00\x00' * (44100 * 4)
+for name, g in (('sixn.wav', b''), ('sixg.wav', gap)):
+    body = g.join(pcm(os.path.join(d, f)) for f in src)
+    with open(os.path.join(d, name), 'wb') as f:
+        f.write(b'RIFF' + struct.pack('<I', 36 + len(body)) + b'WAVEfmt ')
+        f.write(struct.pack('<IHHIIHH', 16, 1, 1, 44100, 88200, 2, 16))
+        f.write(b'data' + struct.pack('<I', len(body)))
+        f.write(body)
+PY
+for v in sixn sixg; do
+    rm -f "$OUT"/$v-*.png
+    vlog=$("$BIN" "$OUT/$v.wav" --out "$OUT" --prefix "$v" 2>&1)
+    n=$(ls "$OUT"/$v-*.png 2>/dev/null | wc -l | tr -d ' ')
+    c=$(echo "$vlog" | grep -c 'image ended (complete)')
+    if [ "$n" = "6" ] && [ "$c" = "6" ]; then
+        ok "$v" "6 shots" "six pictures, $([ "$v" = "sixn" ] && echo 'no gap' || echo '4 s gaps')"
+    else
+        bad "$v" "6 shots" "pictures $n, complete $c :: $(echo "$vlog" | grep -E 'VIS|ended' | tr '\n' '|')"
+    fi
+done
+
 # multiple files in one command line
 rm -f "$OUT"/multi*.png
 "$TX" "$OUT/testcard.ppm" "$OUT/m1.wav" --mode 8 >/dev/null 2>&1
