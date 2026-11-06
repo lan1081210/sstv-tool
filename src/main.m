@@ -112,8 +112,9 @@ static const char *zh_end(int k)
 
 /* Launched from the .app there is no terminal: keep a log so "why did it stop
  * early" has an answer afterwards. */
-static void setup_headless_log(void)
+static void setup_headless_log(int argc)
 {
+    if (argc > 1) return;                 /* a CLI run: keep stdout on the terminal */
     if ([[NSBundle mainBundle] bundleIdentifier] == nil) return;   /* CLI: stdout is fine */
     if (isatty(fileno(stdout))) return;
     NSString *dir = [@"~/Library/Logs" stringByExpandingTildeInPath];
@@ -752,21 +753,26 @@ static void free_rgb(void *info, const void *data, size_t size)
     if ([panel runModal] != NSModalResponseOK) return;
     NSString *img = [[panel URL] path];
 
-    NSString *wav = nil;
-    if (play) {
-        NSString *dir = [@"~/Music/SSTV Tool" stringByExpandingTildeInPath];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
-                                 attributes:nil error:NULL];
-        wav = [dir stringByAppendingPathComponent:
-               [NSString stringWithFormat:@"%@-%@.wav",
-                [[img lastPathComponent] stringByDeletingPathExtension], modeTitle]];
-    } else {
+    /* default target: ~/Music/SSTV Tool, same place the player uses. Only ask for
+     * a path when Option is held -- one less thing that can fail silently. */
+    NSString *dir = [@"~/Music/SSTV Tool" stringByExpandingTildeInPath];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                             attributes:nil error:NULL];
+    NSString *defaultName = [NSString stringWithFormat:@"%@-%@.wav",
+                             [[img lastPathComponent] stringByDeletingPathExtension], modeTitle];
+    NSString *wav = [dir stringByAppendingPathComponent:defaultName];
+
+    BOOL wantsPanel = play ? NO : ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0);
+    if (wantsPanel) {
         NSSavePanel *save = [NSSavePanel savePanel];
         [save setAllowedContentTypes:@[ [UTType typeWithFilenameExtension:@"wav"] ]];
-        [save setNameFieldStringValue:[NSString stringWithFormat:@"%@-%@.wav",
-                                       [[img lastPathComponent] stringByDeletingPathExtension], modeTitle]];
+        [save setNameFieldStringValue:defaultName];
+        [save setCanCreateDirectories:YES];
         if ([save runModal] != NSModalResponseOK) return;
-        wav = [[save URL] path];
+        NSString *chosen = [[save URL] path];
+        if (!chosen.length) chosen = wav;                     /* panel gave us nothing */
+        if (![[chosen pathExtension] isEqualToString:@"wav"]) chosen = [chosen stringByAppendingPathExtension:@"wav"];
+        wav = chosen;
     }
     [self encodeAndSend:img to:wav play:play];
 }
@@ -785,6 +791,9 @@ static void free_rgb(void *info, const void *data, size_t size)
     long frames = 0;
 
     g_tx_note = [NSString stringWithFormat:@"正在生成 %@ …", modeTitle];
+    fprintf(stderr, "encode %s -> %s (%s)\n", img.fileSystemRepresentation,
+            wav.fileSystemRepresentation, modeTitle.UTF8String);
+    fflush(stderr);
     [self setNeedsDisplay:YES];
 
     if (encode_image(img.fileSystemRepresentation, wav.fileSystemRepresentation, &o,
@@ -796,8 +805,23 @@ static void free_rgb(void *info, const void *data, size_t size)
     g_tx_last = wav;
     g_tx_total = frames > 0 ? (double)frames / o.rate : 0;
 
+    /* check it really landed: a zero-byte or missing file must not pass quietly */
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:wav error:NULL];
+    unsigned long long size = [attrs fileSize];
+    if (!attrs || size < 1024) {
+        g_tx_note = [NSString stringWithFormat:@"写 WAV 失败（%@）", wav];
+        fprintf(stderr, "save wav: %s failed (size %llu)\n", wav.fileSystemRepresentation, size);
+        fflush(stderr);
+        [self setNeedsDisplay:YES];
+        return;
+    }
+    fprintf(stderr, "save wav: %s (%.0f s, %llu bytes)\n", wav.fileSystemRepresentation, g_tx_total, size);
+    fflush(stderr);
+
     if (!play) {
-        g_tx_note = [NSString stringWithFormat:@"已存 %@（%.0f 秒）", [wav lastPathComponent], g_tx_total];
+        g_tx_note = [NSString stringWithFormat:@"已存 %@（%.0f 秒，%.1f MB）→ Music/SSTV Tool",
+                     [wav lastPathComponent], g_tx_total, (double)size / 1048576.0];
+        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ [NSURL fileURLWithPath:wav] ]];
         [self setNeedsDisplay:YES];
         return;
     }
@@ -1397,7 +1421,7 @@ static int encode_cli(int argc, char **argv)
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
-    @autoreleasepool { setup_headless_log(); }
+    @autoreleasepool { setup_headless_log(argc); }
 
     if (argc > 1 && !strcmp(argv[1], "encode")) {
         @autoreleasepool { return encode_cli(argc, argv); }
