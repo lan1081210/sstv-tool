@@ -15,7 +15,7 @@ OBJCFLAGS  ?= -fobjc-arc -O2 -g -Wall -Wextra -Wno-unused-parameter
 LDFLAGS    ?=
 FW = -framework Foundation -framework AppKit -framework AVFoundation -framework AudioToolbox \
      -framework AudioUnit -framework CoreAudio -framework CoreFoundation -framework CoreGraphics \
-     -framework CoreText -framework ImageIO
+     -framework CoreText -framework ImageIO -framework UniformTypeIdentifiers
 
 BUILD := build
 BIN   := $(BUILD)/sstv-tool

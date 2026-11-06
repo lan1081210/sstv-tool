@@ -24,6 +24,24 @@ VIS 丢了（信号开头没抄到、被压掉）就退一步用行同步脉冲�
 
 ## 发：一张图变成 SSTV 音频
 
+窗口里就能发（不用记命令行）：底部第二排是 **模式下拉框 + 「发图片并播放」+ 「存成 WAV」+ 「停止」**。
+
+- 「发图片并播放」：选图 → 按下拉框里的模式生成 → 从系统默认输出放出来，右侧显示
+  `正在发射 47% 剩 68 s 图名-模式.wav`，一条橙色进度条跟着走；「停止」随时掐断
+- 「存成 WAV」：只生成文件，给你用别的播放器/发射机
+- 生成的文件都存在 `~/Music/SSTV Tool/`（跟 SSTVEncoder2 存 Music 的习惯一致）
+- 窗口里那排「暂停 / 取消这张」管的是**接收**，跟发射互不影响
+
+命令行等价物（不带窗口，直接出 WAV；加 `--play` 就放出来）：
+
+```sh
+sstv-tool --send 图.png --mode pd120            # 开窗口发，带进度条
+sstv-tool --send 图.png --mode pd50 --no-play   # 只生成，不播放
+sstv-tool encode 图.png --mode m1 --play        # 纯命令行，无窗口
+```
+
+详细参数：
+
 ```sh
 # 最基本：默认 Robot 36，输出 example-Robot36.wav 放在图旁边
 sstv-tool encode example.jpg
