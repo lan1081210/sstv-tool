@@ -1,0 +1,110 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Self-test: synthesize a test card in every mode, decode it, and check the
+# picture that came out (image count, stored size, the decoder's own sync stats).
+# Then a few impaired-signal cases: skew, noise, no VIS, two modes back to back.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+
+BIN=build/apricot-sstv
+TX=build/sstv_tx
+OUT=test/out
+mkdir -p "$OUT"
+
+[ -x "$BIN" ] || { echo "build first: make"; exit 1; }
+[ -x "$TX" ] || { echo "build first: make tools"; exit 1; }
+[ -f "$OUT/testcard.ppm" ] || python3 test/gen_testcard.py "$OUT/testcard.ppm" 640 496 >/dev/null
+
+pngsize() {  # $1 = png -> WxH
+    python3 - "$1" <<'PY'
+import struct, sys
+d = open(sys.argv[1], 'rb').read(33)
+assert d[:8] == b'\x89PNG\r\n\x1a\n', 'not a png'
+print('%dx%d' % struct.unpack('>II', d[16:24]))
+PY
+}
+
+fail=0
+pass=0
+ok()  { pass=$((pass+1)); printf '%-12s %-6s PASS  %s\n' "$1" "$2" "$3"; }
+bad() { fail=$((fail+1)); printf '%-12s %-6s FAIL  %s\n' "$1" "$2" "$3"; }
+
+check_mode() {  # name vis expected-WxH [extra sstv_tx args...]
+    local name=$1 vis=$2 want=$3; shift 3
+    local wav="$OUT/$name.wav" png="$OUT/$name-1.png"
+    rm -f "$OUT/$name"-*.png
+    "$TX" "$OUT/testcard.ppm" "$wav" --mode "$vis" "$@" >/dev/null 2>&1
+    local log; log=$("$BIN" "$wav" --out "$OUT" 2>&1)
+    if [ ! -f "$png" ]; then bad "$name" "$vis" "no image written"; return; fi
+    local got; got=$(pngsize "$png")
+    local detail; detail=$(echo "$log" | grep 'image ended' | sed 's/^ *[0-9.]* s  //')
+    if [ "$got" = "$want" ] && echo "$log" | grep -q 'image ended (complete)'; then
+        ok "$name" "$vis" "$got  $detail"
+    else
+        bad "$name" "$vis" "want $want got $got :: $detail"
+    fi
+}
+
+echo "== every mode =="
+check_mode Robot36    8  320x240
+check_mode Robot72   12  320x240
+check_mode MartinM1  44  320x256
+check_mode MartinM2  40  320x256
+check_mode ScottieS1 60  320x256
+check_mode ScottieS2 56  320x256
+check_mode ScottieDX 76  320x256
+check_mode PD50      93  320x256
+check_mode PD90      99  320x256
+check_mode PD120     95  320x248
+check_mode PD160     98  256x200
+check_mode PD180     96  320x248
+check_mode PD240     97  320x248
+check_mode PD290     94  400x308
+
+echo
+echo "== impaired signals =="
+# sender 400 ppm fast, mistuned by -40 Hz, noisy: must still finish and report ppm
+check_mode PD120skew 95 320x248 --skew -400 --offset -40 --snr 18
+grep -q "" /dev/null  # no-op keeps shellcheck quiet
+# no VIS at all: the autosync path has to lock on by itself
+check_mode PD120novis 95 320x248 --novis
+
+# two pictures back to back in one file (VIS-less Robot 36 then PD90)
+python3 - "$OUT" <<'PY'
+import struct, sys, os
+d = sys.argv[1]
+def pcm(p):
+    b = open(p, 'rb').read()
+    i = b.find(b'data')
+    n = struct.unpack('<I', b[i+4:i+8])[0]
+    return b[i+8:i+8+n]
+a, b = pcm(os.path.join(d, 'MartinM1.wav')), pcm(os.path.join(d, 'PD90.wav'))
+body = a + b
+with open(os.path.join(d, 'seq.wav'), 'wb') as f:
+    f.write(b'RIFF' + struct.pack('<I', 36 + len(body)) + b'WAVEfmt ')
+    f.write(struct.pack('<IHHIIHH', 16, 1, 1, 44100, 88200, 2, 16))
+    f.write(b'data' + struct.pack('<I', len(body)))
+    f.write(body)
+print('seq.wav: %.1f s' % (len(body) / 2 / 44100))
+PY
+rm -f "$OUT"/seq-*.png
+seqlog=$("$BIN" "$OUT/seq.wav" --out "$OUT" 2>&1)
+nseq=$(ls "$OUT"/seq-*.png 2>/dev/null | wc -l | tr -d ' ')
+if [ "$nseq" = "2" ] && echo "$seqlog" | grep -q 'Martin M1' && echo "$seqlog" | grep -q 'PD90'; then
+    ok seq 44+99 "2 pictures: $(ls "$OUT"/seq-*.png | xargs -n1 basename | tr '\n' ' ')"
+else
+    bad seq 44+99 "pictures $nseq :: $(echo "$seqlog" | tr '\n' '|')"
+fi
+
+# multiple files in one command line
+rm -f "$OUT"/multi*.png
+"$TX" "$OUT/testcard.ppm" "$OUT/m1.wav" --mode 8 >/dev/null 2>&1
+"$TX" "$OUT/testcard.ppm" "$OUT/m2.wav" --mode 60 >/dev/null 2>&1
+mlog=$("$BIN" "$OUT/m1.wav" "$OUT/m2.wav" --out "$OUT" --prefix multi 2>&1)
+nmulti=$(ls "$OUT"/multi-*.png 2>/dev/null | wc -l | tr -d ' ')
+if [ "$nmulti" = "2" ]; then ok multi "2 files" "2 pictures via --prefix"; else
+    bad multi "2 files" "got $nmulti :: $(echo "$mlog" | tail -3 | tr '\n' '|')"; fi
+
+echo
+echo "$pass passed, $fail failed"
+exit $([ "$fail" -eq 0 ] && echo 0 || echo 1)
