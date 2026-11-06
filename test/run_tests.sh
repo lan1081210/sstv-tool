@@ -144,12 +144,22 @@ o.setnchannels(ch); o.setsampwidth(sw); o.setframerate(rate)
 o.writeframes(data[:cut] + gap + data[cut:]); o.close()
 PY
     rm -f "$OUT"/drop-*.png
-    dl=$("$BIN" "$OUT/dropout.wav" --out "$OUT" --prefix drop 2>&1)
+    dl=$("$BIN" "$OUT/dropout.wav" --out "$OUT" --prefix drop --lost 12 2>&1)
     drows=$(echo "$dl" | grep 'signal lost' | grep -oE '[0-9]+/[0-9]+ rows' | head -1)
     if echo "$dl" | grep -q 'image ended (signal lost)'; then
-        ok dropout 95 "ended early as designed: $drows (20 s without sync)"
+        ok dropout "--lost 12" "gives up as asked: $drows"
     else
         bad dropout 95 "expected a signal-lost end :: $(echo "$dl" | grep ended | tr '\n' '|')"
+    fi
+
+    # default behaviour: no timeout -- a 60 s hole still ends with a full frame
+    rm -f "$OUT"/scan-*.png
+    sl=$("$BIN" "$OUT/PD120.wav" --out "$OUT" --prefix scan --drop-at 60 --drop-len 60 2>&1)
+    if echo "$sl" | grep -q 'image ended (complete): PD120, 496/496' && \
+       ! echo "$sl" | grep -q 'signal lost'; then
+        ok "scan it out" 95 "60 s hole, frame still scanned to 496/496"
+    else
+        bad "scan it out" 95 "$(echo "$sl" | grep -E 'ended|started' | tr '\n' '|')"
     fi
 
     # a real capture dropout (samples lost, reported through sstv_gap) must NOT

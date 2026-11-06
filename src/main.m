@@ -55,9 +55,23 @@ static int g_continuous = 0;          /* 1 = roll from one picture straight into
 
 /* Called by the decoder (inside sstv_feed, so the lock is already held) with the
  * finished picture, just before the buffer is reused for the next frame. */
+/* how many lines of a finished frame actually had a sync pulse: a frame that
+ * was mostly silence is dropped instead of filling the folder with blanks */
+static int frame_is_worth_saving(void)
+{
+    SstvStatus st;
+    sstv_status(g_rx, &st);
+    if (st.sync_seen <= 0) return 0;
+    return st.sync_good * 10 >= st.sync_seen;      /* at least 10 % of the lines */
+}
+
 static void on_frame(void *ud, const uint16_t *px, int w, int h, int rows)
 {
     (void)ud; (void)rows;
+    if (!frame_is_worth_saving()) {
+        if (!g_quiet) { printf("            frame dropped (almost no sync)\n"); fflush(stdout); }
+        return;
+    }
     NSString *dir = g_outDir ? g_outDir : [@"." stringByExpandingTildeInPath];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
                              attributes:nil error:NULL];
@@ -267,7 +281,10 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
         fflush(stdout);
     }
     int rollover = (g_continuous && g_st.end_kind == SSTV_END_NONE);
-    if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX && !rollover) {
+    if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX && !rollover &&
+        g_st.end_kind == SSTV_END_COMPLETE && !frame_is_worth_saving()) {
+        if (!g_quiet) { printf("            frame dropped (almost no sync)\n"); fflush(stdout); }
+    } else if (g_st.state != SSTV_RX && g_prev.state == SSTV_RX && !rollover) {
         /* a loss keeps the picture (the decoder re-aligns when syncs return),
          * so store it aside instead of using up a picture number */
         NSString *p = (g_st.end_kind == SSTV_END_LOST) ? save_partial_locked() : save_image_locked();
@@ -1446,8 +1463,15 @@ int main(int argc, char **argv)
         id pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"lostSeconds"];
         if (pref) lost_s = [pref doubleValue];
     }
-    if (lost_s <= 0) lost_s = 20.0;      /* more forgiving than upstream's 12 s */
-    if (lost_s > 0) sstv_set_lost_seconds(lost_s, lost_s / 2.0);
+    if (lost_s > 0) {
+        /* an explicit window: give up on a frame after that long without sync */
+        sstv_set_lost_seconds(lost_s, lost_s / 2.0);
+        sstv_set_no_timeout(0);
+    } else {
+        /* default: no timeout at all -- keep scanning until the picture's full
+         * length has gone by, blank rows and all */
+        sstv_set_no_timeout(1);
+    }
     if (rx_lock) sstv_set_mode_lock(rx_lock);
     sstv_set_frame_cb(on_frame, NULL);
     sstv_set_continuous(g_continuous);

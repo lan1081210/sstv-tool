@@ -80,10 +80,16 @@ static int g_lock_vis = 0;
  * gets the picture through the frame callback, which runs before the buffer is
  * cleared for the next frame. */
 static int g_cont = 0;
+/* "scan it out": never give up on a frame just because the signal went away --
+ * keep the time base running and finish when the whole picture has been
+ * scanned. Rows with no signal stay blank. */
+static int g_no_timeout = 0;
 static void (*g_frame_cb)(void *ud, const uint16_t *px, int w, int h, int rows) = 0;
 static void *g_frame_ud = 0;
 
 void sstv_set_continuous(int on) { g_cont = on; }
+void sstv_set_no_timeout(int on) { g_no_timeout = on; }
+int  sstv_get_no_timeout(void) { return g_no_timeout; }
 int  sstv_get_continuous(void) { return g_cont; }
 void sstv_set_frame_cb(void (*cb)(void *ud, const uint16_t *px, int w, int h, int rows), void *ud)
 {
@@ -697,7 +703,7 @@ static void process_period(SstvRx *s)
     lost = (int)((s->start_kind == SSTV_START_VIS ? g_lost_vis : g_lost_sync) / s->m->line);
     if (lost < 8) lost = 8;
     if (s->k >= s->nper) finish(s, SSTV_END_COMPLETE);
-    else if (s->miss_run >= lost) finish(s, SSTV_END_LOST);
+    else if (!g_no_timeout && s->miss_run >= lost) finish(s, SSTV_END_LOST);
 }
 
 /* ------------------------------------------------------------------ VIS */

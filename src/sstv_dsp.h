@@ -99,6 +99,12 @@ int sstv_dirty(SstvRx *s, int *y0, int *y1);
 void sstv_abort(SstvRx *s);
 /* Blank the picture. */
 void sstv_clear(SstvRx *s);
+/* Never give up on a frame because the signal went away: keep scanning (rows
+ * with no signal stay blank) and finish when the picture's full length has
+ * elapsed. Off by default (upstream's behaviour: give up after a timeout). */
+void sstv_set_no_timeout(int on);
+int  sstv_get_no_timeout(void);
+
 /* Continuous output: with a mode locked (or a VIS heard), a finished picture
  * rolls straight into the next one on the same grid -- no VIS, no re-lock, no
  * gap between frames. The picture is handed to the frame callback before the
