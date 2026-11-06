@@ -1292,6 +1292,12 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 2; }
     }
     if (g_scale < 1) g_scale = 1;
+    if (lost_s <= 0) {
+        /* the .app has no command line: let a preference carry it
+         *   defaults write com.lan.sstv-tool lostSeconds -float 30 */
+        id pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"lostSeconds"];
+        if (pref) lost_s = [pref doubleValue];
+    }
     if (lost_s > 0) sstv_set_lost_seconds(lost_s, lost_s / 2.0);
     g_outDir = outDir ? [outDir stringByExpandingTildeInPath] : nil;
 
