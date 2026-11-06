@@ -43,8 +43,10 @@ static double g_rate = 44100.0;
 static double g_samples = 0.0;
 static NSString *g_lastSaved = nil;
 static volatile int g_sigint = 0;
+static volatile sig_atomic_t g_sig_pause = 0, g_sig_cancel = 0;
 static float g_level = 0.0f;          /* smoothed RMS of the decoded input, 0..1 */
 static NSString *g_note = nil;        /* one line of state/warning for the window */
+static int g_paused = 0;              /* 1 = not feeding the decoder (audio still runs) */
 
 static const char *start_name(int k)
 {
@@ -119,7 +121,22 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
     float rms = (float)sqrt(sum / (double)n);
 
     pthread_mutex_lock(&g_lock);
-    sstv_feed(g_rx, x, n, 1);
+    if (g_sig_pause) {
+        g_sig_pause = 0;
+        g_paused = !g_paused;
+        g_note = g_paused ? @"已暂停 · 空格或「继续」接着收" : nil;
+    }
+    if (g_sig_cancel) {
+        g_sig_cancel = 0;
+        if (g_rx) sstv_abort(g_rx);
+    }
+    if (g_paused) {
+        /* tell the decoder these samples were lost, so its time base stays
+         * exact and the rows in the gap are simply not drawn */
+        sstv_gap(g_rx, n);
+    } else {
+        sstv_feed(g_rx, x, n, 1);
+    }
     g_samples += n;
     g_level = 0.75f * g_level + 0.25f * rms;
     sstv_status(g_rx, &g_st);
@@ -166,6 +183,9 @@ static void on_sigint(int sig)
     (void)sig;
     g_sigint = 1;
 }
+
+static void on_sig_pause(int sig)  { (void)sig; g_sig_pause = 1; }
+static void on_sig_cancel(int sig) { (void)sig; g_sig_cancel = 1; }
 
 /* Anything still on screen when the run stops is worth keeping. */
 static void save_partial(void)
@@ -389,6 +409,8 @@ static void *sim_thread(void *arg)
     CGImageRef _img;
     unsigned _rev;
     BOOL _hasRev;
+    NSButton *_pauseBtn;
+    NSButton *_cancelBtn;
 }
 - (void)refresh;
 @end
@@ -400,6 +422,54 @@ static void free_rgb(void *info, const void *data, size_t size)
 }
 
 @implementation PreviewView
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self) {
+        /* the picture area is black; dark appearance keeps the buttons legible */
+        [self setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+        _pauseBtn = [[NSButton alloc] initWithFrame:NSMakeRect(14, 6, 92, 24)];
+        [_pauseBtn setTitle:@"暂停"];
+        [_pauseBtn setBezelStyle:NSBezelStyleRounded];
+        [_pauseBtn setTarget:self];
+        [_pauseBtn setAction:@selector(togglePause:)];
+        [_pauseBtn setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+        [_pauseBtn setToolTip:@"暂停接收（空格）：画面停住，音频照样在跑"];
+        [self addSubview:_pauseBtn];
+
+        _cancelBtn = [[NSButton alloc] initWithFrame:NSMakeRect(112, 6, 100, 24)];
+        [_cancelBtn setTitle:@"取消这张"];
+        [_cancelBtn setBezelStyle:NSBezelStyleRounded];
+        [_cancelBtn setTarget:self];
+        [_cancelBtn setAction:@selector(cancelShot:)];
+        [_cancelBtn setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+        [_cancelBtn setToolTip:@"放弃正在收的这张图（X）：已解出的部分照样存盘"];
+        [self addSubview:_cancelBtn];
+    }
+    return self;
+}
+
+- (void)togglePause:(id)sender
+{
+    (void)sender;
+    pthread_mutex_lock(&g_lock);
+    g_paused = !g_paused;
+    g_note = g_paused ? @"已暂停：画面停在这一行，恢复后从下一行接着收" : nil;
+    pthread_mutex_unlock(&g_lock);
+    [self.window makeFirstResponder:self];      /* keep space/x working */
+    [self setNeedsDisplay:YES];
+}
+
+- (void)cancelShot:(id)sender
+{
+    (void)sender;
+    pthread_mutex_lock(&g_lock);
+    if (g_rx) sstv_abort(g_rx);          /* picture kept; the feed path saves it */
+    pthread_mutex_unlock(&g_lock);
+    [self.window makeFirstResponder:self];
+    [self setNeedsDisplay:YES];
+}
 
 - (BOOL)isOpaque { return YES; }
 
@@ -450,7 +520,7 @@ static void free_rgb(void *info, const void *data, size_t size)
     pthread_mutex_unlock(&g_lock);
 
     NSRect b = self.bounds;
-    CGFloat barTop = 74, barBot = 26;
+    CGFloat barTop = 74, barBot = 34;
     NSRect imgArea = NSMakeRect(12, barBot + 10, b.size.width - 24, b.size.height - barTop - barBot - 10);
 
     if (_img) {
@@ -516,15 +586,26 @@ static void free_rgb(void *info, const void *data, size_t size)
     NSString *line3 = g_lastSaved ? [NSString stringWithFormat:@"已存 %@", [g_lastSaved lastPathComponent]]
                                   : @"图片自动保存到输出目录";
     [line3 drawAtPoint:NSMakePoint(14, b.size.height - 22) withAttributes:w2];
-    if (g_note) {
-        NSDictionary *wn = @{ NSFontAttributeName: mono,
-                              NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:1.0 green:0.62 blue:0.25 alpha:1] };
-        [g_note drawAtPoint:NSMakePoint(14, imgArea.origin.y - 2 - 16) withAttributes:wn];
+
+    if (g_paused) {
+        /* dim the picture and say so: the capture is still running */
+        [[NSColor colorWithCalibratedWhite:0.0 alpha:0.45] setFill];
+        NSRectFill(imgArea);
+        NSDictionary *pa = @{ NSFontAttributeName: [NSFont systemFontOfSize:17 weight:NSFontWeightMedium],
+                              NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:1.0 alpha:0.92] };
+        NSString *pm = @"已暂停";
+        NSSize psz = [pm sizeWithAttributes:pa];
+        [pm drawAtPoint:NSMakePoint(imgArea.origin.x + (imgArea.size.width - psz.width) / 2,
+                                    imgArea.origin.y + imgArea.size.height / 2)
+          withAttributes:pa];
     }
+    [_pauseBtn setTitle:(g_paused ? @"继续" : @"暂停")];
+    [_cancelBtn setEnabled:(st.state == SSTV_RX)];
 
     /* level meter (left) and tuning indicator (right) */
-    CGFloat mw = (b.size.width - 40) / 2;
-    NSRect lv = NSMakeRect(14, 10, mw, 12);
+    CGFloat mw = (b.size.width - 240) / 2;
+    if (mw < 40) mw = 40;
+    NSRect lv = NSMakeRect(224, 10, mw, 12);
     [[NSColor colorWithCalibratedWhite:0.22 alpha:1] setFill];
     NSRectFill(lv);
     double dbfs = level > 0.0001f ? 20.0 * log10(level) : -60.0;
@@ -536,7 +617,7 @@ static void free_rgb(void *info, const void *data, size_t size)
     [[NSColor colorWithCalibratedWhite:0.8 alpha:0.9] setFill];
     NSRectFill(NSMakeRect(lv.origin.x + (CGFloat)(lv.size.width * (40.0 / 60.0)), lv.origin.y, 1, lv.size.height));
 
-    NSRect tb = NSMakeRect(b.size.width / 2 + 6, 10, mw, 12);
+    NSRect tb = NSMakeRect(224 + mw + 8, 10, mw, 12);
     [[NSColor colorWithCalibratedWhite:0.22 alpha:1] setFill];
     NSRectFill(tb);
     /* the sync/porch band the decoder cares about: 1500..2300 Hz, 1200 = black */
@@ -547,15 +628,27 @@ static void free_rgb(void *info, const void *data, size_t size)
                           tb.origin.y, (CGFloat)(tb.size.width * ((2300.0 - 1500.0) / 1400.0)), tb.size.height));
     [[NSColor colorWithCalibratedRed:1.0 green:0.82 blue:0.25 alpha:1] setFill];
     NSRectFill(NSMakeRect(tb.origin.x + (CGFloat)(tb.size.width * tf) - 2, tb.origin.y - 2, 4, tb.size.height + 4));
+
+    /* hint / warning line, right of the buttons and above the meters */
+    if (g_note) {
+        NSDictionary *wn = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
+                              NSForegroundColorAttributeName: [NSColor colorWithCalibratedRed:1.0 green:0.66 blue:0.3 alpha:1] };
+        NSPoint at = NSMakePoint(224, 26);
+        NSRect room = NSMakeRect(224, 24, b.size.width - 238, 16);
+        [g_note drawInRect:room withAttributes:wn];
+        (void)at;
+    }
 }
 
 - (void)keyDown:(NSEvent *)e
 {
     NSString *s = [e charactersIgnoringModifiers];
-    if (s.length && ([s characterAtIndex:0] == 'q' || [s characterAtIndex:0] == 27))
-        [NSApp terminate:nil];
-    else
-        [super keyDown:e];
+    if (!s.length) return;
+    unichar c = [s characterAtIndex:0];
+    if (c == 'q' || c == 27) [NSApp terminate:nil];
+    else if (c == ' ') [self togglePause:nil];
+    else if (c == 'x' || c == 'X') [self cancelShot:nil];
+    else [super keyDown:e];
 }
 
 @end
@@ -722,6 +815,8 @@ static int live_capture(int device_index, BOOL view, int autosync, int have_ppm,
 
     if (begin_capture(device_index, autosync, have_ppm, ppm) != 0) return 1;
     signal(SIGINT, on_sigint);
+    signal(SIGUSR1, on_sig_pause);
+    signal(SIGUSR2, on_sig_cancel);
     {
         time_t t0 = time(NULL), last = 0;
         while (!g_sigint) {
@@ -817,6 +912,8 @@ int main(int argc, char **argv)
         if (simulate) {
             if (!simfile) { usage(argv[0]); return 2; }
             g_prefix = prefix ?: @"live";
+            signal(SIGUSR1, on_sig_pause);
+            signal(SIGUSR2, on_sig_cancel);
             SimCtx ctx = { [@(simfile) stringByExpandingTildeInPath] };
             pthread_t th;
             pthread_create(&th, NULL, sim_thread, &ctx);

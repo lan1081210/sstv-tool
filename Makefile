@@ -78,6 +78,10 @@ $(BUILD)/sstv_tx: tools/sstv_tx.c tools/enc.c tools/util.c $(TX_DEPS) | $(BUILD)
 test: $(BIN) tools
 	./test/run_tests.sh
 
+# pause / cancel on a real-time replay (~90 s, wall-clock on purpose)
+test-pause: $(BIN)
+	./test/pause_test.sh
+
 install: $(BIN)
 	install -d $(PREFIX)/bin
 	install -m 755 $(BIN) $(PREFIX)/bin/apricot-sstv
@@ -86,4 +90,4 @@ clean:
 	rm -rf $(BUILD) test/out
 
 PREFIX ?= /usr/local
-.PHONY: all tools app test install clean
+.PHONY: all tools app test test-pause install clean
