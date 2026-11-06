@@ -1334,7 +1334,11 @@ static int encode_cli(int argc, char **argv)
         else if (!strcmp(a, "--rate") && i + 1 < argc) o.rate = atoi(argv[++i]);
         else if (!strcmp(a, "--lead") && i + 1 < argc) o.lead_s = atof(argv[++i]);
         else if (!strcmp(a, "--tail") && i + 1 < argc) o.tail_s = atof(argv[++i]);
-        else if (!strcmp(a, "--gain") && i + 1 < argc) o.amplitude = atof(argv[++i]);
+        else if (!strcmp(a, "--gain") && i + 1 < argc) {
+            double g = atof(argv[++i]);
+            if (g < 0) g = 0; if (g > 1) g = 1;
+            o.amplitude = g * 32767.0;      /* enc.c wants s16 units */
+        }
         else if (!strcmp(a, "--ppm") && i + 1 < argc) o.skew_ppm = atof(argv[++i]);
         else if (!strcmp(a, "--offset") && i + 1 < argc) o.offset_hz = atof(argv[++i]);
         else if (!strcmp(a, "--snr") && i + 1 < argc) o.snr_db = atof(argv[++i]);

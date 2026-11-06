@@ -293,6 +293,23 @@ else
     done
 fi
 
+# the encoder must put real level on the wire: a 0..1 "gain" slipped in once and
+# produced -90 dBFS files that only the sign bit could decode
+"$BIN" encode "$IMAGE" --mode 8 --out "$OUT/peak.wav" >/dev/null 2>&1
+peak=$(python3 - "$OUT/peak.wav" <<'PY3'
+import sys, wave, struct
+w = wave.open(sys.argv[1]); d = w.readframes(w.getnframes()); w.close()
+s = struct.unpack('<%dh' % (len(d)//2), d)
+print(max(max(s), -min(s)))
+PY3
+)
+if [ "${peak:-0}" -gt 3000 ]; then
+    ok "encoder level" 8 "peak $peak of 32767"
+else
+    bad "encoder level" 8 "peak $peak -- the WAV would be silent"
+fi
+rm -f "$OUT/peak.wav"
+
 echo
 echo "$pass passed, $fail failed"
 exit $([ "$fail" -eq 0 ] && echo 0 || echo 1)

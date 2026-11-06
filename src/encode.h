@@ -21,7 +21,7 @@ typedef struct {
     double skew_ppm;      /* simulate the sender's clock error */
     double offset_hz;     /* simulate mistuning */
     double snr_db;        /* add noise; >= 99 = clean */
-    double amplitude;     /* 0..1 of full scale */
+    double amplitude;     /* peak in s16 units (32767 = full scale) */
     int    fit;           /* 0 letterbox (default), 1 fill/crop, 2 stretch */
     const char *text;     /* optional overlay, or NULL */
     int    play;          /* play the result after writing it */

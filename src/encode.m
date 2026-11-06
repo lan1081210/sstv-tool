@@ -28,7 +28,7 @@ void encode_defaults(EncodeOpts *o)
     o->lead_s = 0.7;
     o->tail_s = 0.5;
     o->snr_db = 99.0;
-    o->amplitude = 0.9;
+    o->amplitude = 12000.0;   /* s16 units, like enc.c's own default (not 0..1!) */
     o->fit = 0;
     o->text = NULL;
     o->play = 0;
