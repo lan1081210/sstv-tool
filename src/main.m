@@ -27,6 +27,7 @@
 #include "sstv_dsp.h"
 #include "image_out.h"
 #include "audio_in.h"
+#include "encode.h"
 
 /* ------------------------------------------------------------------ state */
 
@@ -807,7 +808,7 @@ static void live_cleanup(void)
 static int live_capture(int device_index, BOOL view, int autosync, int have_ppm, int ppm)
 {
     if (view) {
-        run_ui([NSString stringWithFormat:@"Apricot SSTV — %@", @(audio_in_device_name())],
+        run_ui([NSString stringWithFormat:@"SSTV Tool — %@", @(audio_in_device_name())],
                ^{ begin_capture(device_index, autosync, have_ppm, ppm); });
         live_cleanup();
         return 0;
@@ -846,13 +847,36 @@ static int live_capture(int device_index, BOOL view, int autosync, int have_ppm,
 
 /* ------------------------------------------------------------------ main */
 
+static void encode_usage(const char *argv0)
+{
+    printf("usage:\n");
+    printf("  %s encode <image> [options]    make SSTV audio from a picture\n", argv0);
+    printf("  %s encode --list-modes         list what it can send\n\n", argv0);
+    printf("options:\n");
+    printf("  --mode M         mode name or VIS code (default 8 Robot 36; e.g. pd120, m1, s2)\n");
+    printf("  --out FILE       output WAV (default: <image>-<mode>.wav next to the image)\n");
+    printf("  --rate HZ        sample rate (default 44100)\n");
+    printf("  --fit MODE       letterbox (default, keeps the aspect with black borders),\n");
+    printf("                   fill (crop to fill), stretch\n");
+    printf("  --text STRING    text overlay in the lower left corner\n");
+    printf("  --lead S         silence before the picture (default 0.7)\n");
+    printf("  --tail S         silence after it (default 0.5)\n");
+    printf("  --gain F         amplitude 0..1 (default 0.9)\n");
+    printf("  --ppm N          simulate the sender's clock error\n");
+    printf("  --offset HZ      simulate mistuning\n");
+    printf("  --snr DB         add noise (measured in 3 kHz)\n");
+    printf("  --play           play the result through the default output as it is written\n");
+    printf("  --no-wait        with --play: do not wait for playback to finish\n\n");
+}
+
 static void usage(const char *argv0)
 {
-    printf("Apricot SSTV for macOS — multi-mode SSTV decoder (14 modes)\n\n");
+    printf("SSTV Tool for macOS — multi-mode SSTV receiver and transmitter (14 modes)\n\n");
     printf("usage:\n");
     printf("  %s <file> [more files...]      decode recordings (wav/aiff/m4a/flac/caf ...)\n", argv0);
     printf("  %s --listen                    decode live from an audio input\n", argv0);
     printf("  %s --simulate <file>           replay a file in real time through the live path\n", argv0);
+    printf("  %s encode <image>              make SSTV audio from a picture (see '%s encode -h')\n", argv0, argv0);
     printf("  %s --list                      list audio input devices\n\n", argv0);
     printf("options:\n");
     printf("  --out DIR        where PNGs go (default: next to the recording / current dir)\n");
@@ -867,9 +891,96 @@ static void usage(const char *argv0)
     printf("modes: Robot 36/72, Martin M1/M2, Scottie S1/S2/DX, PD50/90/120/160/180/240/290\n");
 }
 
+/* ---------------------------------------------------------------- encode */
+
+static int encode_cli(int argc, char **argv)
+{
+    EncodeOpts o;
+    encode_defaults(&o);
+    const char *image = NULL, *text = NULL;
+    NSString *outPath = nil;
+    int fit = 0;
+
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-h") || !strcmp(a, "--help")) { encode_usage(argv[0]); return 0; }
+        else if (!strcmp(a, "--list-modes")) { encode_list_modes(); return 0; }
+        else if (!strcmp(a, "--mode") && i + 1 < argc) {
+            int v = encode_mode_from_string(argv[++i]);
+            if (v < 0) { fprintf(stderr, "unknown mode \"%s\" (see --list-modes)\n", argv[i]); return 2; }
+            o.vis = v;
+        }
+        else if (!strcmp(a, "--out") && i + 1 < argc) outPath = @(argv[++i]);
+        else if (!strcmp(a, "--rate") && i + 1 < argc) o.rate = atoi(argv[++i]);
+        else if (!strcmp(a, "--lead") && i + 1 < argc) o.lead_s = atof(argv[++i]);
+        else if (!strcmp(a, "--tail") && i + 1 < argc) o.tail_s = atof(argv[++i]);
+        else if (!strcmp(a, "--gain") && i + 1 < argc) o.amplitude = atof(argv[++i]);
+        else if (!strcmp(a, "--ppm") && i + 1 < argc) o.skew_ppm = atof(argv[++i]);
+        else if (!strcmp(a, "--offset") && i + 1 < argc) o.offset_hz = atof(argv[++i]);
+        else if (!strcmp(a, "--snr") && i + 1 < argc) o.snr_db = atof(argv[++i]);
+        else if (!strcmp(a, "--text") && i + 1 < argc) text = argv[++i];
+        else if (!strcmp(a, "--play")) o.play = 1;
+        else if (!strcmp(a, "--no-wait")) o.wait_play = 0;
+        else if (!strcmp(a, "--fit") && i + 1 < argc) {
+            const char *f = argv[++i];
+            if (!strcmp(f, "letterbox") || !strcmp(f, "keep")) fit = 0;
+            else if (!strcmp(f, "fill") || !strcmp(f, "crop")) fit = 1;
+            else if (!strcmp(f, "stretch")) fit = 2;
+            else { fprintf(stderr, "unknown --fit \"%s\"\n", f); return 2; }
+        }
+        else if (!image) image = a;
+        else { fprintf(stderr, "unexpected argument \"%s\"\n", a); return 2; }
+    }
+    if (!image) { encode_usage(argv[0]); return 2; }
+    o.fit = fit;
+    o.text = text;
+    if (o.rate < 8000 || o.rate > 192000) { fprintf(stderr, "rate %d out of range\n", o.rate); return 2; }
+
+    NSString *img = [@(image) stringByExpandingTildeInPath];
+    const char *mn = encode_mode_name(o.vis);
+    char clean[64] = "sstv";
+    for (int k = 0, j = 0; mn && mn[k] && j < 63; k++)
+        if (isalnum((unsigned char)mn[k])) clean[j++] = mn[k];
+
+    if (!outPath) {
+        outPath = [[img stringByDeletingPathExtension] stringByAppendingFormat:@"-%s.wav", clean];
+    } else if (![[outPath pathExtension] length] || [[outPath pathExtension] isEqualToString:@"dir"]) {
+        NSString *base = [[img lastPathComponent] stringByDeletingPathExtension];
+        outPath = [outPath stringByAppendingPathComponent:
+                   [NSString stringWithFormat:@"%@-%s.wav", base, clean]];
+    }
+    outPath = [outPath stringByExpandingTildeInPath];
+
+    char err[512] = "";
+    long frames = 0;
+    if (encode_image(img.fileSystemRepresentation, outPath.fileSystemRepresentation, &o,
+                     err, sizeof err, &frames) != 0) {
+        fprintf(stderr, "encode: %s\n", err[0] ? err : "failed");
+        return 1;
+    }
+    int mw = 0, mh = 0;
+    {
+        /* picture size of the mode, for the one-line report */
+        extern int enc_mode_size(int, int *, int *);
+        enc_mode_size(o.vis, &mw, &mh);
+    }
+    if (!g_quiet)
+        printf("%s  %dx%d  %.1f s @ %d Hz -> %s\n", mn ? mn : "mode ?", mw, mh,
+               (double)frames / o.rate, o.rate, outPath.fileSystemRepresentation);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
+
+    if (argc > 1 && !strcmp(argv[1], "encode")) {
+        @autoreleasepool { return encode_cli(argc, argv); }
+    }
+    if (argc > 1 && !strcmp(argv[1], "decode")) {     /* symmetric spelling */
+        for (int i = 1; i + 1 < argc; i++) argv[i] = argv[i + 1];
+        argc--;
+    }
 
     NSMutableArray<NSString *> *files = [NSMutableArray array];
     BOOL listen = NO, view = YES, simulate = NO;
@@ -918,7 +1029,7 @@ int main(int argc, char **argv)
             pthread_t th;
             pthread_create(&th, NULL, sim_thread, &ctx);
             if (view) {
-                run_ui([NSString stringWithFormat:@"Apricot SSTV — %@", [ctx.path lastPathComponent]], nil);
+                run_ui([NSString stringWithFormat:@"SSTV Tool — %@", [ctx.path lastPathComponent]], nil);
             } else {
                 pthread_join(th, NULL);
                 return 0;

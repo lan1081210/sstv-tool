@@ -10,7 +10,7 @@
 # of `make test`; run it with `make test-pause`.
 set -u
 cd "$(dirname "$0")/.." || exit 1
-BIN=build/apricot-sstv
+BIN=build/sstv-tool
 OUT=test/out
 WAV=$OUT/Robot36.wav
 fail=0

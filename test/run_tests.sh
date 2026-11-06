@@ -6,7 +6,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-BIN=build/apricot-sstv
+BIN=build/sstv-tool
 TX=build/sstv_tx
 OUT=test/out
 mkdir -p "$OUT"
@@ -166,6 +166,44 @@ mlog=$("$BIN" "$OUT/m1.wav" "$OUT/m2.wav" --out "$OUT" --prefix multi 2>&1)
 nmulti=$(ls "$OUT"/multi-*.png 2>/dev/null | wc -l | tr -d ' ')
 if [ "$nmulti" = "2" ]; then ok multi "2 files" "2 pictures via --prefix"; else
     bad multi "2 files" "got $nmulti :: $(echo "$mlog" | tail -3 | tr '\n' '|')"; fi
+
+# transmit -> receive round trip through the tool's own encoder (a picture in,
+# a WAV out, decoded back), every mode.
+echo
+echo "== encode -> decode round trip"
+IMAGE=$OUT/PD120-1.png
+if [ ! -f "$IMAGE" ]; then
+    bad encode "-" "no source picture ($IMAGE)"
+else
+    for entry in \
+        "Robot36 8 320x240" "Robot72 12 320x240" "MartinM2 40 320x256" "MartinM1 44 320x256" \
+        "ScottieS2 56 320x256" "ScottieS1 60 320x256" "ScottieDX 76 320x256" \
+        "PD50 93 320x256" "PD90 99 320x256" "PD120 95 320x248" "PD160 98 256x200" \
+        "PD180 96 320x248" "PD240 97 320x248" "PD290 94 400x308"; do
+        set -- $entry
+        nm=$1 vis=$2 want=$3
+        wav=$OUT/rt-$nm.wav
+        rm -f "$OUT"/rt-"$nm"-*.png
+        if ! "$BIN" encode "$IMAGE" --mode "$vis" --out "$wav" >/dev/null 2>&1; then
+            bad "enc $nm" "$vis" "encoder failed"
+            continue
+        fi
+        dlog=$("$BIN" "$wav" --out "$OUT" --prefix "rt-$nm" 2>&1)
+        png=$OUT/rt-$nm-1.png
+        if [ ! -f "$png" ]; then
+            bad "enc $nm" "$vis" "encoded but did not decode"
+            continue
+        fi
+        got=$(pngsize "$png")
+        if [ "$got" = "$want" ] && echo "$dlog" | grep -q 'image ended (complete)' && \
+           echo "$dlog" | grep -q "VIS $vis "; then
+            ok "enc $nm" "$vis" "$got round trip"
+        else
+            bad "enc $nm" "$vis" "want $want got $got :: $(echo "$dlog" | grep -E 'VIS|ended' | tr '\n' '|')"
+        fi
+        rm -f "$wav"
+    done
+fi
 
 echo
 echo "$pass passed, $fail failed"

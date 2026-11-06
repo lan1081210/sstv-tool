@@ -1,26 +1,30 @@
 # SPDX-License-Identifier: GPL-3.0-only
-# Apricot SSTV for macOS (arm64) -- build the decoder + the test-signal tools.
+# SSTV Tool for macOS (arm64) -- receiver + transmitter, plus the test-signal
+# tools.
 #
-#   make            build/apricot-sstv
-#   make tools      build/sstv_tx (makes test WAVs from a PPM)
-#   make test       build everything and run the decode self-test
+#   make            build/sstv-tool + build/SSTV Tool.app
+#   make test       decode self-test (14 modes, impaired signals, continuous rx)
+#   make test-pause pause / cancel on a real-time replay (~90 s)
 #   make install    copy the binary to $(PREFIX)/bin (PREFIX=/usr/local)
 #
-# The decoder core (src/sstv_dsp.c) is the iPod nano's, unmodified.
+# The decoder core (src/sstv_dsp.c) is the iPod nano's, unmodified; the encoder
+# is the host encoder from the same upstream repo (tools/enc.c).
 CC         ?= clang
 CFLAGS     ?= -std=c11 -O2 -g -Wall -Wextra -Wno-unused-parameter -D_DEFAULT_SOURCE
 OBJCFLAGS  ?= -fobjc-arc -O2 -g -Wall -Wextra -Wno-unused-parameter
 LDFLAGS    ?=
 FW = -framework Foundation -framework AppKit -framework AVFoundation -framework AudioToolbox \
      -framework AudioUnit -framework CoreAudio -framework CoreFoundation -framework CoreGraphics \
-     -framework ImageIO
+     -framework CoreText -framework ImageIO
 
 BUILD := build
-BIN   := $(BUILD)/apricot-sstv
+BIN   := $(BUILD)/sstv-tool
+INC   := -Isrc -Itools
 
 CORE_OBJS := $(BUILD)/sstv_dsp.o $(BUILD)/image_out.o $(BUILD)/audio_in.o
-OBJS      := $(CORE_OBJS) $(BUILD)/main.o
-HDRS      := $(wildcard src/*.h)
+ENC_OBJS  := $(BUILD)/encode.o $(BUILD)/enc.o $(BUILD)/util.o
+OBJS      := $(CORE_OBJS) $(ENC_OBJS) $(BUILD)/main.o
+HDRS      := $(wildcard src/*.h) $(wildcard tools/*.h)
 
 all: $(BIN) tools app
 
@@ -28,19 +32,29 @@ $(BUILD):
 	@mkdir -p $(BUILD)
 
 $(BUILD)/%.o: src/%.c $(HDRS) | $(BUILD)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 
-$(BUILD)/main.o: src/main.m $(HDRS) | $(BUILD)
-	$(CC) $(OBJCFLAGS) -c -o $@ $<
+$(BUILD)/%.o: src/%.m $(HDRS) | $(BUILD)
+	$(CC) $(OBJCFLAGS) $(INC) -c -o $@ $<
+
+$(BUILD)/enc.o: tools/enc.c tools/enc.h | $(BUILD)
+	$(CC) $(CFLAGS) -Itools -c -o $@ $<
+
+$(BUILD)/util.o: tools/util.c tools/util.h | $(BUILD)
+	$(CC) $(CFLAGS) -Itools -c -o $@ $<
 
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(FW) -lm
 
-# A minimal .app: its own TCC identity, so the microphone prompt names the app
-# (and survives rebuilds). Double-click it to go straight to live decoding.
-ICON   := assets/AppIcon.icns
+# ---- test-signal tool: PPM in, WAV out (used by the self-tests) ----
+tools: $(BUILD)/sstv_tx
+$(BUILD)/sstv_tx: tools/sstv_tx.c tools/enc.c tools/util.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -Itools -o $@ tools/sstv_tx.c tools/enc.c tools/util.c -lm
+
+# ---- the .app: its own TCC identity, so the microphone prompt names the app ----
+ICON     := assets/AppIcon.icns
 ICON_SRC := assets/AppIcon-1024.png
-APP := build/Apricot SSTV.app
+APP      := build/SSTV Tool.app
 
 $(BUILD)/makeicon: tools/makeicon.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $< -framework CoreGraphics -framework ImageIO -framework CoreFoundation
@@ -62,18 +76,11 @@ $(ICON): $(ICON_SRC)
 app: $(APP)
 $(APP): $(BIN) Info.plist $(ICON)
 	@mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
-	cp $(BIN) "$(APP)/Contents/MacOS/apricot-sstv"
+	cp $(BIN) "$(APP)/Contents/MacOS/sstv-tool"
 	cp Info.plist "$(APP)/Contents/Info.plist"
 	cp $(ICON) "$(APP)/Contents/Resources/AppIcon.icns"
 	codesign --force --sign - "$(APP)" 2>/dev/null || true
 	@echo "built: $(APP)"
-
-# ---- test-signal tools (from the upstream repo's host/ directory) ----
-TX_DEPS := tools/util.h tools/enc.h
-tools: $(BUILD)/sstv_tx
-
-$(BUILD)/sstv_tx: tools/sstv_tx.c tools/enc.c tools/util.c $(TX_DEPS) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tools/sstv_tx.c tools/enc.c tools/util.c -lm
 
 test: $(BIN) tools
 	./test/run_tests.sh
@@ -84,10 +91,10 @@ test-pause: $(BIN)
 
 install: $(BIN)
 	install -d $(PREFIX)/bin
-	install -m 755 $(BIN) $(PREFIX)/bin/apricot-sstv
+	install -m 755 $(BIN) $(PREFIX)/bin/sstv-tool
 
 clean:
 	rm -rf $(BUILD) test/out
 
 PREFIX ?= /usr/local
-.PHONY: all tools app test test-pause install clean
+.PHONY: all tools app icon test test-pause install clean

@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Apricot SSTV</string>
+    <string>SSTV Tool</string>
     <key>CFBundleDisplayName</key>
-    <string>Apricot SSTV</string>
+    <string>SSTV Tool</string>
     <key>CFBundleIdentifier</key>
-    <string>com.lan.apricot-sstv</string>
+    <string>com.lan.sstv-tool</string>
     <key>CFBundleExecutable</key>
-    <string>apricot-sstv</string>
+    <string>sstv-tool</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
