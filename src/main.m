@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* main.m -- Apricot SSTV for macOS (arm64): a desktop front end for the
- * portable decoder core in sstv_dsp.c (the one the iPod nano runs).
+/* main.m -- SSTV Tool for macOS (arm64): a desktop front end for the
+ * portable decoder core in sstv_dsp.c (the one the iPod nano runs) and for the
+ * transmitter in encode.m.
  *
- *   apricot-sstv <file> [more files...]   decode recordings (any CoreAudio format)
- *   apricot-sstv --listen [--device N]    live decode from an audio input
- *   apricot-sstv --simulate <file>        replay a file in real time through
+ *   sstv-tool <file> [more files...]      decode recordings (any CoreAudio format)
+ *   sstv-tool --listen [--device N]       live decode from an audio input
+ *   sstv-tool --simulate <file>           replay a file in real time through
  *                                         the live path (with the on-screen UI)
- *   apricot-sstv --list                   list audio input devices
+ *   sstv-tool encode <image> [options]    make SSTV audio from a picture
+ *   sstv-tool --list                      list audio input devices
  *
  * Pictures are written as PNG next to the recordings (or --out DIR), one file
  * per completed image, plus the one in progress at the end of a recording.
