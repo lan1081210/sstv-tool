@@ -63,6 +63,21 @@ static const char *end_name(int k)
     }
 }
 
+/* ------------------------------------------------------------ mode table */
+
+/* Every mode this build decodes, asked of the decoder itself (no hard-coded
+ * list that can drift). */
+static NSArray<NSString *> *supported_modes(void)
+{
+    NSMutableArray<NSString *> *a = [NSMutableArray array];
+    for (int v = 1; v < 128; v++) {
+        if (!sstv_vis_supported(v)) continue;
+        const char *n = sstv_vis_name(v);
+        if (n) [a addObject:@(n)];
+    }
+    return a;
+}
+
 /* ------------------------------------------------------------- image save */
 
 /* Caller holds g_lock. Returns the path written, or nil. */
@@ -447,11 +462,24 @@ static void free_rgb(void *info, const void *data, size_t size)
     } else {
         NSDictionary *a = @{ NSFontAttributeName: [NSFont systemFontOfSize:15],
                              NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.5 alpha:1] };
-        NSString *msg = @"等待 SIGNAL…  (等 VIS 头)";
+        NSString *msg = @"等待 SSTV 信号 · 自动识别，无需选模式";
         NSSize sz = [msg sizeWithAttributes:a];
         [msg drawAtPoint:NSMakePoint(imgArea.origin.x + (imgArea.size.width - sz.width) / 2,
                                      imgArea.origin.y + imgArea.size.height / 2)
           withAttributes:a];
+        NSDictionary *al = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
+                              NSForegroundColorAttributeName: [NSColor colorWithCalibratedWhite:0.42 alpha:1] };
+        NSArray<NSString *> *modes = supported_modes();
+        NSMutableArray<NSString *> *rows = [NSMutableArray array];
+        for (NSUInteger i = 0; i < modes.count; i += 4)
+            [rows addObject:[[modes subarrayWithRange:NSMakeRange(i, MIN((NSUInteger)4, modes.count - i))]
+                             componentsJoinedByString:@"   "]];
+        NSMutableString *blk = [NSMutableString stringWithString:@"听 VIS 头自动选模式；丢了 VIS 就靠行同步脉冲锁：\n"];
+        for (NSString *r in rows) [blk appendFormat:@"%@\n", r];
+        NSSize bs = [blk sizeWithAttributes:al];
+        [blk drawAtPoint:NSMakePoint(imgArea.origin.x + (imgArea.size.width - bs.width) / 2,
+                                     imgArea.origin.y + imgArea.size.height / 2 - bs.height - 8)
+          withAttributes:al];
     }
 
     /* status text */
@@ -467,8 +495,11 @@ static void free_rgb(void *info, const void *data, size_t size)
                  start_name(st.start_kind)];
     else if (st.mode)
         line1 = [NSString stringWithFormat:@"%@  已完成 (%s)  %d 张", @(st.mode), end_name(st.end_kind), g_nimg];
+    else if (st.last_vis >= 0)
+        line1 = [NSString stringWithFormat:@"待机 · 自动识别（上次 VIS %d%s）",
+                 st.last_vis, st.last_vis_ok ? "" : "，本版不解"];
     else
-        line1 = @"待机：等待 VIS 头或同步脉冲";
+        line1 = [NSString stringWithFormat:@"待机 · 自动识别（%lu 种模式）", (unsigned long)supported_modes().count];
     [line1 drawAtPoint:NSMakePoint(14, b.size.height - 56) withAttributes:w1];
 
     NSString *line2 = [NSString stringWithFormat:@"调谐 %d Hz (偏移 %+d)   时钟 %+d ppm%s   同步 %d/%d   电平 %.0f dBFS",
@@ -731,7 +762,8 @@ static void usage(const char *argv0)
     printf("  --no-view        no window (live / simulate)\n");
     printf("  --no-autosync    do not start on sync pulses when the VIS was missed\n");
     printf("  --ppm N          clock-error prior (ppm), used until the fit settles\n");
-    printf("  --quiet          no event log\n\n");
+    printf("  --quiet          no event log\n");
+    printf("  --modes          list the modes this build decodes, then exit\n\n");
     printf("modes: Robot 36/72, Martin M1/M2, Scottie S1/S2/DX, PD50/90/120/160/180/240/290\n");
 }
 
@@ -749,6 +781,18 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--listen")) listen = YES;
         else if (!strcmp(argv[i], "--simulate") && i + 1 < argc) { simulate = YES; simfile = argv[++i]; }
         else if (!strcmp(argv[i], "--list")) { int n = audio_in_list(); return n > 0 ? 0 : 1; }
+        else if (!strcmp(argv[i], "--modes")) {
+            printf("VIS  mode          status\n");
+            for (int v = 1; v < 128; v++) {
+                const char *nm = sstv_vis_name(v);
+                if (!nm) continue;
+                printf("%3d  %-13s %s\n", v, nm,
+                       sstv_vis_supported(v) ? "decoded" : "not decoded by this build");
+            }
+            printf("\nthe mode is read from the VIS header; if the VIS was missed the decoder\n"
+                   "locks onto any supported mode's line syncs (-autosync, on by default)\n");
+            return 0;
+        }
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outDir = @(argv[++i]);
         else if (!strcmp(argv[i], "--prefix") && i + 1 < argc) prefix = @(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) g_scale = atoi(argv[++i]);

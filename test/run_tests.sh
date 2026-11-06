@@ -96,6 +96,36 @@ else
     bad seq 44+99 "pictures $nseq :: $(echo "$seqlog" | tr '\n' '|')"
 fi
 
+# four modes back to back in one stream, no pause: the decoder must switch
+# mode on its own as each VIS arrives
+python3 - "$OUT" <<'PY'
+import struct, sys, os
+d = sys.argv[1]
+def pcm(p):
+    b = open(p, 'rb').read()
+    i = b.find(b'data')
+    n = struct.unpack('<I', b[i+4:i+8])[0]
+    return b[i+8:i+8+n]
+body = b''.join(pcm(os.path.join(d, f)) for f in ('Robot36.wav', 'Robot72.wav', 'MartinM1.wav', 'MartinM2.wav'))
+with open(os.path.join(d, 'fourmodes.wav'), 'wb') as f:
+    f.write(b'RIFF' + struct.pack('<I', 36 + len(body)) + b'WAVEfmt ')
+    f.write(struct.pack('<IHHIIHH', 16, 1, 1, 44100, 88200, 2, 16))
+    f.write(b'data' + struct.pack('<I', len(body)))
+    f.write(body)
+print('fourmodes.wav: %.1f s' % (len(body) / 2 / 44100))
+PY
+rm -f "$OUT"/fourmodes-*.png
+flog=$("$BIN" "$OUT/fourmodes.wav" --out "$OUT" 2>&1)
+nfour=$(ls "$OUT"/fourmodes-*.png 2>/dev/null | wc -l | tr -d ' ')
+got_modes=$(echo "$flog" | grep -c 'image ended (complete)')
+if [ "$nfour" = "4" ] && [ "$got_modes" = "4" ] && \
+   echo "$flog" | grep -q 'Robot 36' && echo "$flog" | grep -q 'Robot 72' && \
+   echo "$flog" | grep -q 'Martin M1' && echo "$flog" | grep -q 'Martin M2'; then
+    ok fourmodes 8/12/44/40 "4 pictures, auto-switched: $(ls "$OUT"/fourmodes-*.png | xargs -n1 basename | tr '\n' ' ')"
+else
+    bad fourmodes 8/12/44/40 "pictures $nfour, completed $got_modes :: $(echo "$flog" | grep -E 'VIS|ended' | tr '\n' '|')"
+fi
+
 # multiple files in one command line
 rm -f "$OUT"/multi*.png
 "$TX" "$OUT/testcard.ppm" "$OUT/m1.wav" --mode 8 >/dev/null 2>&1
