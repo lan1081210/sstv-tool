@@ -71,6 +71,9 @@ typedef char img_bytes_cover_max[(IMG_BYTES >= 2u * SSTV_MAX_W * SSTV_MAX_H) ? 1
  * be told to hold on longer with a marginal signal (sstv_set_lost_seconds). */
 static double g_lost_vis = 12.0;
 static double g_lost_sync = 6.0;
+/* 0 = every mode (VIS chooses); otherwise only this VIS code is considered,
+ * which is what a "listen for PD120 all evening" receiver wants. */
+static int g_lock_vis = 0;
 
 void sstv_set_lost_seconds(double vis_s, double sync_s)
 {
@@ -78,6 +81,9 @@ void sstv_set_lost_seconds(double vis_s, double sync_s)
     if (sync_s > 0.5) g_lost_sync = sync_s;
 }
 double sstv_get_lost_seconds(void) { return g_lost_vis; }
+
+void sstv_set_mode_lock(int vis) { g_lock_vis = (vis > 0 && vis < 128) ? vis : 0; }
+int  sstv_get_mode_lock(void) { return g_lock_vis; }
 #define MAX_SKEW     0.03               /* clamp the fitted line period to +-3 % */
 #define RD_BUDGET    10240              /* channel-pixels re-timed per sstv_feed call (bounds
                                            the per-frame cost on the nano) */
@@ -678,7 +684,9 @@ static int vis_test(const SstvRx *s, uint32_t j, int *code, float *off, float *e
     if (m > 1440.0f || m < 960.0f) return 0;           /* cheap reject (runs every 1 ms) */
     lead = bin_mean(s, j - 480, 170);                  /* second leader, inner part */
     *off = lead - 1900.0f;
-    if (*off > 150.0f || *off < -150.0f) return 0;
+    /* upstream accepts +-150 Hz; +-250 covers a radio left a couple of hundred
+     * Hz off without letting much more noise through */
+    if (*off > 250.0f || *off < -250.0f) return 0;
     mid = 1200.0f + *off;
     d = m - mid; if (d > 90.0f || d < -90.0f) return 0; e += d * d;
     m = bin_mean(s, j - 299 + 5, 20);                  /* start bit */
@@ -711,9 +719,10 @@ static void vis_bin_done(SstvRx *s, uint32_t j)
         const Mode *m = mode_by_vis(s->vis_code);
         s->vis_active = 0;
         s->last_vis = s->vis_code;
-        s->last_vis_ok = m != 0;
+        s->last_vis_ok = m != 0 && (!g_lock_vis || s->vis_code == g_lock_vis);
         s->revision++;
-        if (m && !(s->state == SSTV_RX && t_end < s->t_ref + 1.0 * s->Fs))
+        if (m && (!g_lock_vis || s->vis_code == g_lock_vis) &&
+            !(s->state == SSTV_RX && t_end < s->t_ref + 1.0 * s->Fs))
             start_rx(s, m, t_end + m->first * s->Fs * (1.0 + s->ppm_prior * 1e-6), SSTV_START_VIS, s->vis_off);
     }
 }
@@ -796,6 +805,7 @@ static void autosync_try(SstvRx *s)
         const Mode *m = &MODES[mi];
         double Ls = m->sync * s->Fs, P = m->line * s->Fs * (1.0 + s->ppm_prior * 1e-6);
         int q, on = 1, first = s->npulses - 1, need = m->nshape ? 4 : 5;
+        if (g_lock_vis && m->vis != g_lock_vis) continue;
         if (!sync_len_ok(s, m, np->edge)) continue;
         for (q = s->npulses - 2; q >= 0; q--) {
             const Pulse *pq = &s->pulses[q];
@@ -826,7 +836,7 @@ static void autosync_try(SstvRx *s)
                 if (c2) om[cnt++] = acc / c2;
             }
             if (cnt) { sort_d(om, cnt); off = (float)om[cnt / 2] - 1200.0f; } else off = 0.0f;
-            if (off > 150.0f || off < -150.0f) continue;
+            if (off > 250.0f || off < -250.0f) continue;
             for (q = first; m->nshape && q < s->npulses; q++) {
                 double d = (double)(np->edge - s->pulses[q].edge), e = d - (int)(d / P + 0.5) * P;
                 int r;

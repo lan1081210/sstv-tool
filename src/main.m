@@ -216,7 +216,8 @@ static void feed_mono(void *ctx, const int16_t *x, int n)
         const char *nm = sstv_vis_name(g_st.last_vis);
         if (!g_quiet)
             printf("%7.2f s  VIS %d (%s)%s\n", t, g_st.last_vis, nm ? nm : "unknown",
-                   g_st.last_vis_ok ? "" : " - not decoded by this build");
+                   g_st.last_vis_ok ? ""
+                     : (sstv_get_mode_lock() ? " - 不是锁定监听的那个模式" : " - not decoded by this build"));
         fflush(stdout);
     }
     int resumed = g_st.relocks > g_prev.relocks;
@@ -524,6 +525,7 @@ static void *sim_thread(void *arg)
     BOOL _hasRev;
     NSButton *_pauseBtn;
     NSButton *_cancelBtn;
+    NSPopUpButton *_rxPop;
     NSPopUpButton *_modePop;
     NSButton *_txPlayBtn;
     NSButton *_txSaveBtn;
@@ -555,11 +557,27 @@ static void free_rgb(void *info, const void *data, size_t size)
         [_pauseBtn setToolTip:@"暂停接收（空格）：画面停住，音频照样在跑"];
         [self addSubview:_pauseBtn];
 
-        _modePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(14, 36, 132, 24) pullsDown:NO];
+        _rxPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(14, 36, 108, 24) pullsDown:NO];
+        [_rxPop addItemWithTitle:@"收: 自动"];
+        [[_rxPop lastItem] setTag:0];
         for (int v = 1; v < 128; v++) {
             const char *nm = encode_mode_name(v);
             if (!nm) continue;
-            [_modePop addItemWithTitle:@(nm)];
+            [_rxPop addItemWithTitle:[NSString stringWithFormat:@"收: %@", @(nm)]];
+            [[_rxPop lastItem] setTag:v];
+        }
+        [_rxPop selectItemAtIndex:0];
+        [_rxPop setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+        [_rxPop setTarget:self];
+        [_rxPop setAction:@selector(rxModeChanged:)];
+        [_rxPop setToolTip:@"接收模式：自动=认 VIS（推荐）；指定某模式就只认它，整晚守着这一种"];
+        [self addSubview:_rxPop];
+
+        _modePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(128, 36, 118, 24) pullsDown:NO];
+        for (int v = 1; v < 128; v++) {
+            const char *nm = encode_mode_name(v);
+            if (!nm) continue;
+            [_modePop addItemWithTitle:[NSString stringWithFormat:@"发: %@", @(nm)]];
             [[_modePop lastItem] setTag:v];
             if (v == 8) [_modePop selectItem:[_modePop lastItem]];
         }
@@ -567,7 +585,7 @@ static void free_rgb(void *info, const void *data, size_t size)
         [_modePop setToolTip:@"发送用的模式（接收侧是自动识别的，跟这里无关）"];
         [self addSubview:_modePop];
 
-        _txPlayBtn = [[NSButton alloc] initWithFrame:NSMakeRect(152, 36, 122, 24)];
+        _txPlayBtn = [[NSButton alloc] initWithFrame:NSMakeRect(252, 36, 116, 24)];
         [_txPlayBtn setTitle:@"发图片并播放"];
         [_txPlayBtn setBezelStyle:NSBezelStyleRounded];
         [_txPlayBtn setTarget:self];
@@ -576,7 +594,7 @@ static void free_rgb(void *info, const void *data, size_t size)
         [_txPlayBtn setToolTip:@"选一张图，按当前模式生成 SSTV 音频并从默认输出播放"];
         [self addSubview:_txPlayBtn];
 
-        _txSaveBtn = [[NSButton alloc] initWithFrame:NSMakeRect(278, 36, 96, 24)];
+        _txSaveBtn = [[NSButton alloc] initWithFrame:NSMakeRect(374, 36, 90, 24)];
         [_txSaveBtn setTitle:@"存成 WAV"];
         [_txSaveBtn setBezelStyle:NSBezelStyleRounded];
         [_txSaveBtn setTarget:self];
@@ -585,7 +603,7 @@ static void free_rgb(void *info, const void *data, size_t size)
         [_txSaveBtn setToolTip:@"只生成 WAV，不播放"];
         [self addSubview:_txSaveBtn];
 
-        _txStopBtn = [[NSButton alloc] initWithFrame:NSMakeRect(378, 36, 62, 24)];
+        _txStopBtn = [[NSButton alloc] initWithFrame:NSMakeRect(470, 36, 56, 24)];
         [_txStopBtn setTitle:@"停止"];
         [_txStopBtn setBezelStyle:NSBezelStyleRounded];
         [_txStopBtn setTarget:self];
@@ -628,6 +646,18 @@ static void free_rgb(void *info, const void *data, size_t size)
 
 /* ---- transmit: picture -> SSTV WAV -> speaker line ---- */
 
+- (void)rxModeChanged:(id)sender
+{
+    (void)sender;
+    int vis = (int)[[_rxPop selectedItem] tag];
+    sstv_set_mode_lock(vis);
+    g_note = vis ? [NSString stringWithFormat:@"只听 %s（不看 VIS，也可以用行同步锁定）",
+                    encode_mode_name(vis)]
+                 : @"接收模式：自动（按 VIS 认，14 种都收）";
+    [self.window makeFirstResponder:self];
+    [self setNeedsDisplay:YES];
+}
+
 - (void)txStop:(id)sender
 {
     (void)sender;
@@ -644,7 +674,7 @@ static void free_rgb(void *info, const void *data, size_t size)
 {
     [self.window makeFirstResponder:self];
     NSMenuItem *item = [_modePop selectedItem];
-    NSString *modeTitle = item ? [item title] : @"Robot 36";
+    NSString *modeTitle = item ? @(encode_mode_name((int)[item tag])) : @"Robot 36";
 
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     [panel setCanChooseFiles:YES];
@@ -677,7 +707,7 @@ static void free_rgb(void *info, const void *data, size_t size)
 {
     NSMenuItem *item = [_modePop selectedItem];
     int vis = item ? (int)[item tag] : 8;
-    NSString *modeTitle = item ? [item title] : @"Robot 36";
+    NSString *modeTitle = item ? @(encode_mode_name(vis)) : @"Robot 36";
     EncodeOpts o;
     encode_defaults(&o);
     o.vis = vis;
@@ -726,7 +756,7 @@ static void free_rgb(void *info, const void *data, size_t size)
 - (void)startSendPath:(NSString *)img play:(BOOL)play
 {
     NSMenuItem *item = [_modePop selectedItem];
-    NSString *modeTitle = item ? [item title] : @"Robot 36";
+    NSString *modeTitle = item ? @(encode_mode_name((int)[item tag])) : @"Robot 36";
     NSString *dir = [@"~/Music/SSTV Tool" stringByExpandingTildeInPath];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
                              attributes:nil error:NULL];
@@ -927,7 +957,7 @@ static void free_rgb(void *info, const void *data, size_t size)
         NSDictionary *wa = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
                               NSForegroundColorAttributeName:
                                   [NSColor colorWithCalibratedRed:1.0 green:0.66 blue:0.3 alpha:1] };
-        CGFloat txX = b.size.width / 2 - 10;
+        CGFloat txX = 534;
         CGFloat txW = b.size.width - txX - 14;
         if (txW > 40) {
             [line drawInRect:NSMakeRect(txX, 62, txW, 16) withAttributes:wa];
@@ -1201,7 +1231,9 @@ static void usage(const char *argv0)
     printf("  --no-view        no window (live / simulate)\n");
     printf("  --no-autosync    do not start on sync pulses when the VIS was missed\n");
     printf("  --ppm N          clock-error prior (ppm), used until the fit settles\n");
-    printf("  --lost S         give up on a picture after S seconds without sync (default 12;\n");
+    printf("  --rx-mode M      listen for one mode only (auto | pd120 | m1 | vis code);\n");
+    printf("                   the app has the same thing as a popup next to the buttons\n");
+    printf("  --lost S         give up on a picture after S seconds without sync (default 20;\n");
     printf("                   a marginal or fading signal survives longer with a bigger value)\n");
     printf("  --quiet          no event log\n");
     printf("  --modes          list the modes this build decodes, then exit\n\n");
@@ -1305,6 +1337,7 @@ int main(int argc, char **argv)
     const char *simfile = NULL;
     int device = -1, autosync = 1, have_ppm = 0, ppm = 0;
     double lost_s = 0;
+    int rx_lock = 0;
     NSString *outDir = nil, *prefix = nil;
 
     for (int i = 1; i < argc; i++) {
@@ -1341,6 +1374,12 @@ int main(int argc, char **argv)
             if (v < 0) { fprintf(stderr, "unknown mode \"%s\"\n", argv[i]); return 2; }
             g_mode_vis = v;
         }
+        else if (!strcmp(argv[i], "--rx-mode") && i + 1 < argc) {
+            const char *nm = argv[++i];
+            int v = strcmp(nm, "auto") ? encode_mode_from_string(nm) : 0;
+            if (v < 0) { fprintf(stderr, "unknown receive mode \"%s\"\n", nm); return 2; }
+            rx_lock = v;
+        }
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
         else if (argv[i][0] != '-') [files addObject:@(argv[i])];
         else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 2; }
@@ -1354,7 +1393,16 @@ int main(int argc, char **argv)
     }
     if (lost_s <= 0) lost_s = 20.0;      /* more forgiving than upstream's 12 s */
     if (lost_s > 0) sstv_set_lost_seconds(lost_s, lost_s / 2.0);
-    g_outDir = outDir ? [outDir stringByExpandingTildeInPath] : nil;
+    if (rx_lock) sstv_set_mode_lock(rx_lock);
+    if (outDir) {
+        g_outDir = [outDir stringByExpandingTildeInPath];
+    } else if ([[NSBundle mainBundle] bundleIdentifier] != nil) {
+        /* launched from Finder the working directory is "/" -- pick a place
+         * pictures and recordings can actually go */
+        g_outDir = [@"~/Pictures/SSTV Tool" stringByExpandingTildeInPath];
+    } else {
+        g_outDir = nil;                  /* CLI: next to the recording / cwd */
+    }
 
     @autoreleasepool {
         if (g_send_image) {

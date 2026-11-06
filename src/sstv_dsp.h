@@ -99,6 +99,12 @@ int sstv_dirty(SstvRx *s, int *y0, int *y1);
 void sstv_abort(SstvRx *s);
 /* Blank the picture. */
 void sstv_clear(SstvRx *s);
+/* Listen for one mode only: vis = its VIS code, 0 = every mode (VIS decides).
+ * With a lock the decoder still locks on line syncs when the VIS is missed, but
+ * never switches to another mode. */
+void sstv_set_mode_lock(int vis);
+int  sstv_get_mode_lock(void);
+
 /* How long the receiver may go without a sync pulse before it gives up on the
  * picture and goes back to listening. Upstream: 12 s (VIS start) / 6 s (after an
  * autosync start). A marginal signal survives longer with a bigger value. */

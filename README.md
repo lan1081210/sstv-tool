@@ -13,7 +13,19 @@
   功能对齐 [olgamiller/SSTVEncoder2](https://github.com/olgamiller/SSTVEncoder2)（模式选择 / 保比例 /
   文字叠加 / 存 WAVE / 播放）。
 
-## 收：自动识别，不用选模式
+## 收：自动识别，或者守着一种模式
+
+窗口左下角有个「收:」下拉框：
+
+- **收: 自动**（默认）——按 VIS 头认模式，14 种都收
+- **收: PD120** 之类——只认这一种：VIS 是别的模式就当没听见；VIS 丢了也能靠行同步脉冲锁定。
+  国际空间站那一轮、或者某个固定用 PD120 的台，整晚挂着不用管
+
+命令行同一件事：`sstv-tool --listen --rx-mode pd120`（`--rx-mode auto` 恢复自动）。
+
+图存在 `~/Pictures/SSTV Tool/`（.app 的工作目录是 `/`，写不进去，所以默认放这儿；命令行版仍在当前目录或 `--out`）。
+
+## 偏移是自动纠正的
 
 窗口里没有模式下拉框，因为不需要：收到信号先读 VIS 头定模式（14 种全覆盖），
 VIS 丢了（信号开头没抄到、被压掉）就退一步用行同步脉冲的周期和 sync 长度去匹配锁定。
@@ -153,6 +165,11 @@ Dock 常驻：`defaults write com.apple.dock persistent-apps -array-add '<dict><
 
 图标是 `assets/AppIcon-1024.png`（一张解出来的测试卡，圆角由 `tools/makeicon.c` 现切），
 想换：`make icon SRC=别的图.png`。`assets/AppIcon.icns` 由 Makefile 用 sips + iconutil 生成。
+
+频偏不用手动调：解码器从 VIS 前导（或者从同步脉冲本身）测出偏差、把整套判决门限跟着平移，
+状态行那个 `偏移 -5 Hz` 就是它测到并已经补偿掉的量。本版把可接受的范围从上游的 ±150 Hz 放宽到
+**±250 Hz**——电台表盘差两三百赫兹也能自己纠回来；再远就不是"偏移"，得重调频率了。
+（这次放宽用上游自带的 66 项解码测试回归过，误锁（false start）仍然 0。）
 
 ## 图为什么会提前结束
 
