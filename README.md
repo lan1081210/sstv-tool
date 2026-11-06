@@ -61,6 +61,20 @@ apricot-sstv --simulate recording.wav
 之后重建也不会再问。命令行版跑在自己的终端名下，需要终端在
 系统设置 → 隐私与安全性 → 麦克风 里被勾选。
 
+## 装进"应用程序"和 Dock（可选）
+
+```sh
+make app && cp -R "build/Apricot SSTV.app" /Applications/   # 装进应用程序（Launchpad 里就有）
+open -a "/Applications/Apricot SSTV.app"                    # 启动
+```
+
+Dock：启动后在 Dock 图标上右键 → 选项 → 在 Dock 中保留；或者直接
+`defaults write com.apple.dock persistent-apps -array-add '<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>file:///Applications/Apricot%20SSTV.app/</string><key>_CFURLStringType</key><integer>15</integer></dict><key>file-label</key><string>Apricot SSTV</string><key>file-type</key><integer>41</integer></dict><key>tile-type</key><string>file-tile</string></dict>' && killall Dock`
+（首次启动会弹麦克风授权，点"允许"即可；权限记在 com.lan.apricot-sstv 名下。）
+
+图标是 `assets/AppIcon-1024.png`（就是一张解出来的测试卡，圆角由 `tools/makeicon.c` 现切），
+想换：`make icon SRC=别的图.png`。`assets/AppIcon.icns` 由 Makefile 用 sips + iconutil 生成。
+
 ## 硬件接入
 
 - 电台/对讲机喇叭对着麦克风能解，但不稳。正经做法是音频线进线路输入（USB 声卡），或者

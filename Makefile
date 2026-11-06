@@ -38,12 +38,33 @@ $(BIN): $(OBJS)
 
 # A minimal .app: its own TCC identity, so the microphone prompt names the app
 # (and survives rebuilds). Double-click it to go straight to live decoding.
+ICON   := assets/AppIcon.icns
+ICON_SRC := assets/AppIcon-1024.png
 APP := build/Apricot SSTV.app
+
+$(BUILD)/makeicon: tools/makeicon.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $< -framework CoreGraphics -framework ImageIO -framework CoreFoundation
+
+# regenerate the icon art from a picture: make icon SRC=some.png
+icon: $(BUILD)/makeicon
+	$(BUILD)/makeicon $(or $(SRC),test/out/Robot36-1.png) $(ICON_SRC) 1024 22
+	$(MAKE) $(ICON)
+
+$(ICON): $(ICON_SRC)
+	rm -rf $(BUILD)/AppIcon.iconset && mkdir -p $(BUILD)/AppIcon.iconset
+	@for s in 16 32 128 256 512; do \
+	  sips -z $$s $$s $(ICON_SRC) --out $(BUILD)/AppIcon.iconset/icon_$${s}x$${s}.png >/dev/null; \
+	  d=$$((s * 2)); \
+	  sips -z $$d $$d $(ICON_SRC) --out $(BUILD)/AppIcon.iconset/icon_$${s}x$${s}@2x.png >/dev/null; \
+	done
+	iconutil -c icns $(BUILD)/AppIcon.iconset -o $@
+
 app: $(APP)
-$(APP): $(BIN) Info.plist
-	@mkdir -p "$(APP)/Contents/MacOS"
+$(APP): $(BIN) Info.plist $(ICON)
+	@mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp $(BIN) "$(APP)/Contents/MacOS/apricot-sstv"
 	cp Info.plist "$(APP)/Contents/Info.plist"
+	cp $(ICON) "$(APP)/Contents/Resources/AppIcon.icns"
 	codesign --force --sign - "$(APP)" 2>/dev/null || true
 	@echo "built: $(APP)"
 
