@@ -31,6 +31,7 @@
 #include "image_out.h"
 #include "audio_in.h"
 #include "encode.h"
+#import "generate.h"
 
 /* ------------------------------------------------------------------ state */
 
@@ -89,11 +90,6 @@ static void on_frame(void *ud, const uint16_t *px, int w, int h, int rows)
         fflush(stdout);
     }
 }
-static NSSound *g_tx_sound = nil;      /* the WAV being sent, i.e. played out */
-static double g_tx_total = 0;          /* its length, seconds */
-static double g_tx_started = 0;        /* when playback started */
-static NSString *g_tx_last = nil;      /* last WAV written by the transmitter */
-static NSString *g_tx_note = nil;      /* one line about the transmission */
 static NSString *g_send_image = nil;   /* --send: transmit this picture on startup */
 static int g_send_play = 1;
 static int g_mode_vis = 8;             /* --mode for --send */
@@ -575,10 +571,6 @@ static void *sim_thread(void *arg)
     NSButton *_pauseBtn;
     NSButton *_cancelBtn;
     NSPopUpButton *_rxPop;
-    NSPopUpButton *_modePop;
-    NSButton *_txPlayBtn;
-    NSButton *_txSaveBtn;
-    NSButton *_txStopBtn;
     NSButton *_contChk;
 }
 - (void)refresh;
@@ -622,44 +614,6 @@ static void free_rgb(void *info, const void *data, size_t size)
         [_rxPop setAction:@selector(rxModeChanged:)];
         [_rxPop setToolTip:@"接收模式：自动=认 VIS（推荐）；指定某模式就只认它，整晚守着这一种"];
         [self addSubview:_rxPop];
-
-        _modePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(128, 36, 118, 24) pullsDown:NO];
-        for (int v = 1; v < 128; v++) {
-            const char *nm = encode_mode_name(v);
-            if (!nm) continue;
-            [_modePop addItemWithTitle:[NSString stringWithFormat:@"发: %@", @(nm)]];
-            [[_modePop lastItem] setTag:v];
-            if (v == 8) [_modePop selectItem:[_modePop lastItem]];
-        }
-        [_modePop setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
-        [_modePop setToolTip:@"发送用的模式（接收侧是自动识别的，跟这里无关）"];
-        [self addSubview:_modePop];
-
-        _txPlayBtn = [[NSButton alloc] initWithFrame:NSMakeRect(252, 36, 116, 24)];
-        [_txPlayBtn setTitle:@"发图片并播放"];
-        [_txPlayBtn setBezelStyle:NSBezelStyleRounded];
-        [_txPlayBtn setTarget:self];
-        [_txPlayBtn setAction:@selector(txPlay:)];
-        [_txPlayBtn setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
-        [_txPlayBtn setToolTip:@"选一张图，按当前模式生成 SSTV 音频并从默认输出播放"];
-        [self addSubview:_txPlayBtn];
-
-        _txSaveBtn = [[NSButton alloc] initWithFrame:NSMakeRect(374, 36, 90, 24)];
-        [_txSaveBtn setTitle:@"存成 WAV"];
-        [_txSaveBtn setBezelStyle:NSBezelStyleRounded];
-        [_txSaveBtn setTarget:self];
-        [_txSaveBtn setAction:@selector(txSave:)];
-        [_txSaveBtn setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
-        [_txSaveBtn setToolTip:@"只生成 WAV，不播放"];
-        [self addSubview:_txSaveBtn];
-
-        _txStopBtn = [[NSButton alloc] initWithFrame:NSMakeRect(470, 36, 56, 24)];
-        [_txStopBtn setTitle:@"停止"];
-        [_txStopBtn setBezelStyle:NSBezelStyleRounded];
-        [_txStopBtn setTarget:self];
-        [_txStopBtn setAction:@selector(txStop:)];
-        [_txStopBtn setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
-        [self addSubview:_txStopBtn];
 
         _contChk = [[NSButton alloc] initWithFrame:NSMakeRect(536, 36, 84, 24)];
         [_contChk setButtonType:NSButtonTypeSwitch];
@@ -728,137 +682,6 @@ static void free_rgb(void *info, const void *data, size_t size)
     [self setNeedsDisplay:YES];
 }
 
-- (void)txStop:(id)sender
-{
-    (void)sender;
-    if (g_tx_sound) [g_tx_sound stop];
-    g_tx_sound = nil;
-    [self.window makeFirstResponder:self];
-    [self setNeedsDisplay:YES];
-}
-
-- (void)txPlay:(id)sender { (void)sender; [self sendImage:YES]; }
-- (void)txSave:(id)sender { (void)sender; [self sendImage:NO]; }
-
-- (void)sendImage:(BOOL)play
-{
-    [self.window makeFirstResponder:self];
-    NSMenuItem *item = [_modePop selectedItem];
-    NSString *modeTitle = item ? @(encode_mode_name((int)[item tag])) : @"Robot 36";
-
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    [panel setCanChooseFiles:YES];
-    [panel setAllowsMultipleSelection:NO];
-    [panel setMessage:@"选一张要发送的图片"];
-    if ([panel runModal] != NSModalResponseOK) return;
-    NSString *img = [[panel URL] path];
-
-    /* default target: ~/Music/SSTV Tool, same place the player uses. Only ask for
-     * a path when Option is held -- one less thing that can fail silently. */
-    NSString *dir = [@"~/Music/SSTV Tool" stringByExpandingTildeInPath];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
-                             attributes:nil error:NULL];
-    NSString *defaultName = [NSString stringWithFormat:@"%@-%@.wav",
-                             [[img lastPathComponent] stringByDeletingPathExtension], modeTitle];
-    NSString *wav = [dir stringByAppendingPathComponent:defaultName];
-
-    BOOL wantsPanel = play ? NO : ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0);
-    if (wantsPanel) {
-        NSSavePanel *save = [NSSavePanel savePanel];
-        [save setAllowedContentTypes:@[ [UTType typeWithFilenameExtension:@"wav"] ]];
-        [save setNameFieldStringValue:defaultName];
-        [save setCanCreateDirectories:YES];
-        if ([save runModal] != NSModalResponseOK) return;
-        NSString *chosen = [[save URL] path];
-        if (!chosen.length) chosen = wav;                     /* panel gave us nothing */
-        if (![[chosen pathExtension] isEqualToString:@"wav"]) chosen = [chosen stringByAppendingPathExtension:@"wav"];
-        wav = chosen;
-    }
-    [self encodeAndSend:img to:wav play:play];
-}
-
-/* encode one picture, then play it (or just report where it landed) */
-- (void)encodeAndSend:(NSString *)img to:(NSString *)wav play:(BOOL)play
-{
-    NSMenuItem *item = [_modePop selectedItem];
-    int vis = item ? (int)[item tag] : 8;
-    NSString *modeTitle = item ? @(encode_mode_name(vis)) : @"Robot 36";
-    EncodeOpts o;
-    encode_defaults(&o);
-    o.vis = vis;
-    o.play = 0;                         /* playback is managed here */
-    char err[512] = "";
-    long frames = 0;
-
-    g_tx_note = [NSString stringWithFormat:@"正在生成 %@ …", modeTitle];
-    fprintf(stderr, "encode %s -> %s (%s)\n", img.fileSystemRepresentation,
-            wav.fileSystemRepresentation, modeTitle.UTF8String);
-    fflush(stderr);
-    [self setNeedsDisplay:YES];
-
-    if (encode_image(img.fileSystemRepresentation, wav.fileSystemRepresentation, &o,
-                     err, sizeof err, &frames) != 0) {
-        g_tx_note = [NSString stringWithFormat:@"生成失败：%s", err[0] ? err : "未知错误"];
-        [self setNeedsDisplay:YES];
-        return;
-    }
-    g_tx_last = wav;
-    g_tx_total = frames > 0 ? (double)frames / o.rate : 0;
-
-    /* check it really landed: a zero-byte or missing file must not pass quietly */
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:wav error:NULL];
-    unsigned long long size = [attrs fileSize];
-    if (!attrs || size < 1024) {
-        g_tx_note = [NSString stringWithFormat:@"写 WAV 失败（%@）", wav];
-        fprintf(stderr, "save wav: %s failed (size %llu)\n", wav.fileSystemRepresentation, size);
-        fflush(stderr);
-        [self setNeedsDisplay:YES];
-        return;
-    }
-    fprintf(stderr, "save wav: %s (%.0f s, %llu bytes)\n", wav.fileSystemRepresentation, g_tx_total, size);
-    fflush(stderr);
-
-    if (!play) {
-        g_tx_note = [NSString stringWithFormat:@"已存 %@（%.0f 秒，%.1f MB）→ Music/SSTV Tool",
-                     [wav lastPathComponent], g_tx_total, (double)size / 1048576.0];
-        [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ [NSURL fileURLWithPath:wav] ]];
-        [self setNeedsDisplay:YES];
-        return;
-    }
-
-    [self txStop:nil];
-    NSSound *snd = [[NSSound alloc] initWithContentsOfFile:wav byReference:YES];
-    if (!snd || ![snd play]) {
-        g_tx_note = @"播放失败（文件已生成，可手动播放）";
-        [self setNeedsDisplay:YES];
-        return;
-    }
-    g_tx_sound = snd;
-    g_tx_started = [NSDate timeIntervalSinceReferenceDate];
-    g_tx_note = nil;
-    [self setNeedsDisplay:YES];
-}
-
-- (void)selectModeByVis:(int)vis
-{
-    for (NSMenuItem *it in [_modePop itemArray])
-        if ((int)[it tag] == vis) { [_modePop selectItem:it]; break; }
-}
-
-/* the --send path: no file pickers, straight to encoding and playback */
-- (void)startSendPath:(NSString *)img play:(BOOL)play
-{
-    NSMenuItem *item = [_modePop selectedItem];
-    NSString *modeTitle = item ? @(encode_mode_name((int)[item tag])) : @"Robot 36";
-    NSString *dir = [@"~/Music/SSTV Tool" stringByExpandingTildeInPath];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
-                             attributes:nil error:NULL];
-    NSString *wav = [dir stringByAppendingPathComponent:
-                     [NSString stringWithFormat:@"%@-%@.wav",
-                      [[img lastPathComponent] stringByDeletingPathExtension], modeTitle]];
-    [self encodeAndSend:img to:wav play:play];
-}
-
 - (BOOL)isOpaque { return YES; }
 
 - (void)refresh { [self setNeedsDisplay:YES]; }
@@ -868,7 +691,7 @@ static void free_rgb(void *info, const void *data, size_t size)
     (void)dirty;
     [[NSColor colorWithCalibratedWhite:0.05 alpha:1.0] setFill];
     NSRectFill(self.bounds);
-    if (!g_rx && !g_tx_sound && !g_tx_note) return;
+    if (!g_rx) return;
 
     SstvStatus st;
     memset(&st, 0, sizeof st);
@@ -1031,40 +854,6 @@ static void free_rgb(void *info, const void *data, size_t size)
     [[NSColor colorWithCalibratedRed:1.0 green:0.82 blue:0.25 alpha:1] setFill];
     NSRectFill(NSMakeRect(tb.origin.x + (CGFloat)(tb.size.width * tf) - 2, tb.origin.y - 2, 4, tb.size.height + 4));
 
-    /* transmit progress: what is being sent, how far in, and to which file */
-    double txFrac = 0;
-    NSString *txLine = nil;
-    if (g_tx_sound) {
-        double el = [NSDate timeIntervalSinceReferenceDate] - g_tx_started;
-        if (![g_tx_sound isPlaying] || (g_tx_total > 0 && el >= g_tx_total)) {
-            g_tx_sound = nil;
-            g_tx_note = @"发射结束";
-        } else if (g_tx_total > 0) {
-            txFrac = el / g_tx_total;
-            txLine = [NSString stringWithFormat:@"正在发射 %.0f%%  剩 %.0f s  %@",
-                      txFrac * 100.0, g_tx_total - el, [(g_tx_last ?: @"") lastPathComponent]];
-        }
-    }
-    if (txLine || g_tx_note) {
-        NSString *line = txLine ?: g_tx_note;
-        NSDictionary *wa = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
-                              NSForegroundColorAttributeName:
-                                  [NSColor colorWithCalibratedRed:1.0 green:0.66 blue:0.3 alpha:1] };
-        CGFloat txX = 624;
-        CGFloat txW = b.size.width - txX - 14;
-        if (txW > 40) {
-            [line drawInRect:NSMakeRect(txX, 62, txW, 16) withAttributes:wa];
-            NSRect bar = NSMakeRect(txX, 42, txW, 10);
-            [[NSColor colorWithCalibratedWhite:0.22 alpha:1] setFill];
-            NSRectFill(bar);
-            if (txLine) {
-                [[NSColor colorWithCalibratedRed:0.95 green:0.55 blue:0.25 alpha:1] setFill];
-                NSRectFill(NSMakeRect(bar.origin.x, bar.origin.y,
-                                      (CGFloat)(bar.size.width * txFrac), bar.size.height));
-            }
-        }
-    }
-
     /* hint / warning line, right of the buttons and above the meters */
     if (g_note) {
         NSDictionary *wn = @{ NSFontAttributeName: [NSFont systemFontOfSize:11],
@@ -1097,6 +886,9 @@ static void free_rgb(void *info, const void *data, size_t size)
 
 static PreviewView *g_view = nil;
 
+static GenerateView *g_gen = nil;
+static NSTabView *g_tabs = nil;
+
 static void run_ui(NSString *title, void (^start)(void))
 {
     [NSApplication sharedApplication];
@@ -1104,7 +896,7 @@ static void run_ui(NSString *title, void (^start)(void))
     AppDel *del = [[AppDel alloc] init];
     [NSApp setDelegate:del];
 
-    NSRect frame = NSMakeRect(0, 0, 900, 660);
+    NSRect frame = NSMakeRect(0, 0, 920, 720);
     NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
                                                 styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                            NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
@@ -1112,12 +904,29 @@ static void run_ui(NSString *title, void (^start)(void))
                                                     defer:NO];
     [win setTitle:title];
     [win center];
-    g_view = [[PreviewView alloc] initWithFrame:frame];
-    [win setContentView:g_view];
+
+    /* two pages, switched with the tabs at the top: 接收 / 生成 */
+    NSRect inner = NSMakeRect(0, 0, frame.size.width - 24, frame.size.height - 62);
+    g_tabs = [[NSTabView alloc] initWithFrame:frame];
+    [g_tabs setTabViewType:NSTopTabsBezelBorder];
+
+    NSTabViewItem *rxTab = [[NSTabViewItem alloc] initWithIdentifier:@"rx"];
+    [rxTab setLabel:@"接收"];
+    g_view = [[PreviewView alloc] initWithFrame:inner];
+    [rxTab setView:g_view];
+    [g_tabs addTabViewItem:rxTab];
+
+    NSTabViewItem *txTab = [[NSTabViewItem alloc] initWithIdentifier:@"tx"];
+    [txTab setLabel:@"生成"];
+    g_gen = [[GenerateView alloc] initWithFrame:inner];
+    [txTab setView:g_gen];
+    [g_tabs addTabViewItem:txTab];
+
+    [win setContentView:g_tabs];
     [win makeFirstResponder:g_view];
     [win makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
-    if (start) dispatch_async(dispatch_get_main_queue(), start);   /* capture after the window is up */
+    if (start) dispatch_async(dispatch_get_main_queue(), start);
 
     NSTimer *t = [NSTimer timerWithTimeInterval:1.0 / 30.0 repeats:YES block:^(NSTimer *tt) {
         (void)tt;
@@ -1295,7 +1104,15 @@ static void encode_usage(const char *argv0)
     printf("  --rate HZ        sample rate (default 44100)\n");
     printf("  --fit MODE       letterbox (default, keeps the aspect with black borders),\n");
     printf("                   fill (crop to fill), stretch\n");
-    printf("  --text STRING    text overlay in the lower left corner\n");
+    printf("  --text STRING    text overlay (corner/centre: see --text-pos)\n");
+    printf("  --text-pos N     1..9 numpad anchor (1 = lower left, 5 = centre; default 1)\n");
+    printf("  --text-scale F   text size multiplier (default 1)\n");
+    printf("  --rotate DEG     0/90/180/270\n");
+    printf("  --flip-h --flip-v  mirror the picture\n");
+    printf("  --pan X,Y        slide the picture in the frame, -1..1 (0,0 = centred)\n");
+    printf("  --zoom F         zoom in before cropping (>= 1)\n");
+    printf("  --brightness F   -0.4 .. 0.4\n");
+    printf("  --contrast F     0.5 .. 2.0\n");
     printf("  --lead S         silence before the picture (default 0.7)\n");
     printf("  --tail S         silence after it (default 0.5)\n");
     printf("  --gain F         amplitude 0..1 (default 0.9)\n");
@@ -1367,6 +1184,21 @@ static int encode_cli(int argc, char **argv)
         else if (!strcmp(a, "--offset") && i + 1 < argc) o.offset_hz = atof(argv[++i]);
         else if (!strcmp(a, "--snr") && i + 1 < argc) o.snr_db = atof(argv[++i]);
         else if (!strcmp(a, "--text") && i + 1 < argc) text = argv[++i];
+        else if (!strcmp(a, "--text-pos") && i + 1 < argc) o.text_pos = atoi(argv[++i]);
+        else if (!strcmp(a, "--text-scale") && i + 1 < argc) o.text_scale = atof(argv[++i]);
+        else if (!strcmp(a, "--rotate") && i + 1 < argc) o.rot = atoi(argv[++i]);
+        else if (!strcmp(a, "--flip-h")) o.flip_h = 1;
+        else if (!strcmp(a, "--flip-v")) o.flip_v = 1;
+        else if (!strcmp(a, "--zoom") && i + 1 < argc) o.zoom = atof(argv[++i]);
+        else if (!strcmp(a, "--brightness") && i + 1 < argc) o.brightness = atof(argv[++i]);
+        else if (!strcmp(a, "--contrast") && i + 1 < argc) o.contrast = atof(argv[++i]);
+        else if (!strcmp(a, "--pan") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (sscanf(v, "%lf,%lf", &o.pan_x, &o.pan_y) != 2) {
+                fprintf(stderr, "--pan wants X,Y in -1..1\n");
+                return 2;
+            }
+        }
         else if (!strcmp(a, "--play")) o.play = 1;
         else if (!strcmp(a, "--no-wait")) o.wait_play = 0;
         else if (!strcmp(a, "--fit") && i + 1 < argc) {
@@ -1518,8 +1350,9 @@ int main(int argc, char **argv)
             /* transmitter only: window, no capture */
             NSString *img = g_send_image;
             run_ui([NSString stringWithFormat:@"SSTV Tool — 发送 %@", [img lastPathComponent]], ^{
-                if (g_mode_vis > 0) [g_view selectModeByVis:g_mode_vis];
-                [g_view startSendPath:img play:g_send_play];
+                if (g_tabs) [g_tabs selectTabViewItemAtIndex:1];
+                [g_gen loadImageAtPath:img];
+                if (g_send_play) [g_gen sendNow:YES];
             });
             return 0;
         }

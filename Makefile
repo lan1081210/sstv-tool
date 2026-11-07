@@ -22,7 +22,7 @@ BIN   := $(BUILD)/sstv-tool
 INC   := -Isrc -Itools
 
 CORE_OBJS := $(BUILD)/sstv_dsp.o $(BUILD)/image_out.o $(BUILD)/audio_in.o
-ENC_OBJS  := $(BUILD)/encode.o $(BUILD)/enc.o $(BUILD)/util.o
+ENC_OBJS  := $(BUILD)/encode.o $(BUILD)/enc.o $(BUILD)/util.o $(BUILD)/generate.o
 OBJS      := $(CORE_OBJS) $(ENC_OBJS) $(BUILD)/main.o
 HDRS      := $(wildcard src/*.h) $(wildcard tools/*.h)
 

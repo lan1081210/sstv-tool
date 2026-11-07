@@ -30,7 +30,15 @@ void encode_defaults(EncodeOpts *o)
     o->snr_db = 99.0;
     o->amplitude = 12000.0;   /* s16 units, like enc.c's own default (not 0..1!) */
     o->fit = 0;
+    o->rot = 0;
+    o->flip_h = o->flip_v = 0;
+    o->pan_x = o->pan_y = 0.0;
+    o->zoom = 1.0;
+    o->brightness = 0.0;
+    o->contrast = 1.0;
     o->text = NULL;
+    o->text_pos = 1;              /* lower left, like the old behaviour */
+    o->text_scale = 1.0;
     o->play = 0;
     o->wait_play = 1;
 }
@@ -96,86 +104,114 @@ static CGImageRef load_image(const char *path)
     return img;
 }
 
-/* Draw the picture into an RGB888 buffer of exactly mw x mh. */
-static int render(uint8_t *rgb, int mw, int mh, CGImageRef img, int fit, const char *text,
-                  char *errbuf, size_t errlen)
+/* Draw the picture into an RGB888 buffer of exactly mw x mh: fit, rotation,
+ * flips, zoom, pan, brightness/contrast and the text overlay -- the same code
+ * path the modulator uses, so the editor previews exactly what will be sent. */
+int encode_render_rgb(CGImageRef img, int mw, int mh, const EncodeOpts *o, uint8_t *rgb)
 {
-    /* 32-bit RGBA while drawing (CG has no 24-bit context), RGB888 on the way out */
+    if (!img || !rgb || mw <= 0 || mh <= 0) return -1;
+
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(NULL, (size_t)mw, (size_t)mh, 8, (size_t)mw * 4u,
                                              cs, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(cs);
-    if (!ctx) { snprintf(errbuf, errlen, "no bitmap context"); return -1; }
+    if (!ctx) return -1;
 
     CGContextSetRGBFillColor(ctx, 0, 0, 0, 1);
     CGContextFillRect(ctx, CGRectMake(0, 0, mw, mh));
     CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
 
-    double iw = CGImageGetWidth(img), ih = CGImageGetHeight(img);
-    double sc;
-    if (fit == 2) {                                  /* stretch: fill the frame */
-        CGContextDrawImage(ctx, CGRectMake(0, 0, mw, mh), img);
-    } else {
-        if (fit == 1) sc = fmax((double)mw / iw, (double)mh / ih);   /* fill / crop */
-        else          sc = fmin((double)mw / iw, (double)mh / ih);   /* letterbox, like SSTVEncoder2 */
-        double dw = iw * sc, dh = ih * sc;
-        CGRect r = CGRectMake(((double)mw - dw) / 2, ((double)mh - dh) / 2, dw, dh);
-        CGContextSaveGState(ctx);
-        CGContextClipToRect(ctx, CGRectMake(0, 0, mw, mh));
-        CGContextDrawImage(ctx, r, img);
-        CGContextRestoreGState(ctx);
-    }
+    const double iw = (double)CGImageGetWidth(img), ih = (double)CGImageGetHeight(img);
+    int rot = ((o->rot % 360) + 360) % 360;
+    int swap = (rot == 90 || rot == 270);
+    const double rw = swap ? ih : iw, rh = swap ? iw : ih;      /* bounds after rotation */
+    double zoom = o->zoom > 0.05 ? o->zoom : 1.0;
 
-    if (text && *text) {
-        double size = mh / 12.0;
-        if (size < 8) size = 8;
+    double sc;
+    if (o->fit == 2) sc = zoom;                                  /* stretch: fill the frame */
+    else if (o->fit == 1) sc = fmax(mw / rw, mh / rh) * zoom;    /* fill / crop */
+    else sc = fmin(mw / rw, mh / rh) * zoom;                     /* letterbox */
+    if (sc <= 0) sc = 1;
+
+    const double dw = iw * sc, dh = ih * sc;
+    double slack_x = fmax(0.0, (dw - mw) / 2.0), slack_y = fmax(0.0, (dh - mh) / 2.0);
+    double ox = (o->pan_x < -1 ? -1 : o->pan_x > 1 ? 1 : o->pan_x) * slack_x;
+    double oy = (o->pan_y < -1 ? -1 : o->pan_y > 1 ? 1 : o->pan_y) * slack_y;
+
+    CGContextSaveGState(ctx);
+    CGContextClipToRect(ctx, CGRectMake(0, 0, mw, mh));
+    CGContextTranslateCTM(ctx, mw / 2.0 + ox, mh / 2.0 + oy);
+    CGContextRotateCTM(ctx, rot * M_PI / 180.0);
+    CGContextScaleCTM(ctx, o->flip_h ? -1 : 1, o->flip_v ? -1 : 1);
+    if (o->fit == 2) {
+        double fw = swap ? mh : mw, fh = swap ? mw : mh;
+        CGContextDrawImage(ctx, CGRectMake(-fw / 2.0, -fh / 2.0, fw, fh), img);
+    } else {
+        CGContextDrawImage(ctx, CGRectMake(-dw / 2.0, -dh / 2.0, dw, dh), img);
+    }
+    CGContextRestoreGState(ctx);
+
+    /* text overlay, anchored like a numpad: 1 lower-left ... 9 upper-right */
+    if (o->text && *o->text && o->text_pos >= 0) {
+        double size = (mh / 12.0) * (o->text_scale > 0.1 ? o->text_scale : 1.0);
+        if (size < 7) size = 7;
         CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica-Bold"), size, NULL);
-        CFStringRef keyF = kCTFontAttributeName, keyC = kCTForegroundColorAttributeName;
-        CFRange all = CFRangeMake(0, (CFIndex)strlen(text));
-        CFStringRef str = CFStringCreateWithBytes(NULL, (const UInt8 *)text, all.length,
+        CFStringRef str = CFStringCreateWithBytes(NULL, (const UInt8 *)o->text,
+                                                  (CFIndex)strlen(o->text),
                                                   kCFStringEncodingUTF8, false);
-        CGRect bounds = CGRectMake(0, 0, mw, mh);
-        for (int pass = 0; pass < 2 && str; pass++) {
-            CGColorRef col = pass == 0 ? CGColorCreateGenericRGB(0, 0, 0, 0.85)
-                                       : CGColorCreateGenericRGB(1, 1, 1, 0.95);
-            CFTypeRef keys[2] = { keyF, keyC };
-            CFTypeRef vals[2] = { font, col };
+        int pos = o->text_pos < 1 ? 1 : o->text_pos > 9 ? 9 : o->text_pos;
+        int col = (pos - 1) % 3, row = (pos - 1) / 3;
+        double margin = mh / 40.0;
+        for (int pass = 0; str && pass < 2; pass++) {
+            CGColorRef colr = pass == 0 ? CGColorCreateGenericRGB(0, 0, 0, 0.85)
+                                        : CGColorCreateGenericRGB(1, 1, 1, 0.95);
+            CFTypeRef keys[2] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
+            CFTypeRef vals[2] = { font, colr };
             CFDictionaryRef attrs = CFDictionaryCreate(NULL, (const void **)keys, (const void **)vals, 2,
                                                        &kCFTypeDictionaryKeyCallBacks,
                                                        &kCFTypeDictionaryValueCallBacks);
             CFAttributedStringRef as = CFAttributedStringCreate(NULL, str, attrs);
             CTLineRef line = CTLineCreateWithAttributedString(as);
             double tw = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
-            double margin = mh / 32.0;
-            double x = margin + (pass == 0 ? size / 16.0 : 0);
-            double y = margin * 1.5 - (pass == 0 ? size / 16.0 : 0);
-            CGContextSetTextPosition(ctx, x, y);
-            (void)tw; (void)bounds;
+            double x = col == 0 ? margin : col == 1 ? (mw - tw) / 2.0 : mw - margin - tw;
+            double y = row == 0 ? margin : row == 1 ? (mh - size) / 2.0 : mh - margin - size * 1.15;
+            double sh = pass == 0 ? fmax(1.0, size / 16.0) : 0.0;
+            CGContextSetTextPosition(ctx, x + sh, y - sh);
             CTLineDraw(line, ctx);
             CFRelease(line);
             CFRelease(as);
             CFRelease(attrs);
-            CGColorRelease(col);
-            if (tw > mw - 2 * margin && pass == 0) { /* too wide: stop after the shadow */ }
+            CGColorRelease(colr);
+            if (tw > mw - 2 * margin) break;
         }
         if (str) CFRelease(str);
         CFRelease(font);
     }
 
-    /* RGBA -> RGB888 for the encoder (row 0 of the buffer is the top of the picture) */
-    uint8_t *px = CGBitmapContextGetData(ctx);
+    /* RGBA -> RGB888, with brightness / contrast applied on the way */
+    double contrast = o->contrast > 0.05 ? o->contrast : 1.0;
+    double brightness = o->brightness;
+    uint8_t lut[256];
+    for (int i = 0; i < 256; i++) {
+        double v = ((i / 255.0) - 0.5) * contrast + 0.5 + brightness;
+        v = v < 0 ? 0 : v > 1 ? 1 : v;
+        lut[i] = (uint8_t)(v * 255.0 + 0.5);
+    }
+    const uint8_t *px = CGBitmapContextGetData(ctx);
     for (int y = 0; y < mh; y++) {
         const uint8_t *s = px + (size_t)y * (size_t)mw * 4u;
         uint8_t *d = rgb + (size_t)y * (size_t)mw * 3u;
         for (int x = 0; x < mw; x++) {
-            d[x * 3 + 0] = s[x * 4 + 0];
-            d[x * 3 + 1] = s[x * 4 + 1];
-            d[x * 3 + 2] = s[x * 4 + 2];
+            d[x * 3 + 0] = lut[s[x * 4 + 0]];
+            d[x * 3 + 1] = lut[s[x * 4 + 1]];
+            d[x * 3 + 2] = lut[s[x * 4 + 2]];
         }
     }
     CGContextRelease(ctx);
     return 0;
 }
+
+CGImageRef encode_load_image(const char *path) { return load_image(path); }
 
 const char *encode_mode_name(int vis)
 {
@@ -201,9 +237,9 @@ int encode_image(const char *image_path, const char *wav_path, const EncodeOpts 
     uint8_t *rgb = malloc((size_t)mw * (size_t)mh * 3u);
     if (!rgb) { CGImageRelease(img); snprintf(errbuf, errlen, "out of memory"); return -1; }
 
-    int rc = render(rgb, mw, mh, img, o->fit, o->text, errbuf, errlen);
+    int rc = encode_render_rgb(img, mw, mh, o, rgb);
     CGImageRelease(img);
-    if (rc != 0) { free(rgb); return -1; }
+    if (rc != 0) { free(rgb); CGImageRelease(img); snprintf(errbuf, errlen, "cannot render the picture"); return -1; }
 
     EncOpts e;
     enc_default_opts(&e);
