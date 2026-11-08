@@ -1,0 +1,25 @@
+SSTV Tool for macOS (arm64)
+===========================
+
+Copyright (C) 2026 LAN (BI7KGI)  <https://github.com/Lan1081210>
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.  See LICENSE.
+
+It contains code from:
+
+  Apricot SSTV  --  https://github.com/SodaGray/apricot-sstv
+  Copyright (C) the apricot-sstv authors, GPL-3.0
+  src/sstv_dsp.c, src/sstv_dsp.h, tools/enc.c, tools/sstv_tx.c, tools/util.c
+  are taken from there unmodified.
+
+New in this project (also GPL-3.0):
+  src/main.m            AppKit window: receive / generate tabs, CLI
+  src/audio_in.c        CoreAudio AUHAL capture
+  src/image_out.c       ImageIO PNG output
+  src/encode.m          picture -> SSTV WAV (wraps the upstream encoder)
+  src/generate.m        canvas rendering for the generator tab
+  tools/makeicon.c      app icon
+  test/                 test-card generator and the regression scripts

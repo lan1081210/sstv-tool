@@ -3,6 +3,10 @@
 一个 macOS 上的 SSTV 收发工具：**收**（解码电台/录音里的慢扫描电视信号，自动认模式）
 和**发**（把一张图变成 SSTV 音频，喂给电台发出去）。
 
+![PD120 解码结果](docs/demo-decode.png)
+
+*自测里的一段 PD120 测试卡：从合成音频解回来，角落里的十字、灰阶与彩条都在。*
+
 底子是 [SodaGray/apricot-sstv](https://github.com/SodaGray/apricot-sstv)（iPod nano 7 上的 SSTV 接收机）：
 
 - 解码核心 `src/sstv_dsp.c` 原样搬过来，一行没动（GPL-3.0）：解调、VIS 检测、无 VIS 自动锁同步、
