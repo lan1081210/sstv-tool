@@ -1,5 +1,7 @@
 # SSTV Tool for macOS (arm64)
 
+[English](README.en.md) · 中文
+
 一个 macOS 上的 SSTV 收发工具：**收**（解码电台/录音里的慢扫描电视信号，自动认模式）
 和**发**（把一张图变成 SSTV 音频，喂给电台发出去）。
 
